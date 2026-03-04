@@ -168,25 +168,42 @@ typescript:publish-gitlab:
 
 # ---------------------------------------------------------------------------
 # Stage: publish-public
-# Publish to PyPI and npmjs (public registries).
-# Requires protected CI/CD variables:
-#   PYPI_TOKEN  — PyPI API token (https://pypi.org/manage/account/token/)
-#   NPM_TOKEN   — npmjs access token (https://www.npmjs.com/settings/~/tokens)
+# Publish to PyPI and npmjs using trusted publisher (OIDC) — no long-lived
+# secrets required. Configure a trusted publisher in each registry's dashboard
+# pointing at this GitLab project/environment before the first release.
 # ---------------------------------------------------------------------------
 
 python:publish-pypi:
   stage: publish-public
   image: python:3.11-slim
   <<: *rules-python-tag-only
+  id_tokens:
+    PYPI_ID_TOKEN:
+      aud: pypi
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
   needs:
     - python:publish-gitlab
   before_script:
-    - pip install twine
+    - pip install twine requests
   script:
     - echo "Publishing Python package to PyPI"
+    # Exchange the GitLab OIDC token for a short-lived PyPI mint token
+    - |
+      PYPI_MINT_TOKEN=$(python3 - <<'EOF'
+      import os, json, urllib.request
+      req = urllib.request.Request(
+          "https://pypi.org/_/oidc/mint-token",
+          data=json.dumps({"token": os.environ["PYPI_ID_TOKEN"]}).encode(),
+          headers={"Content-Type": "application/json"},
+          method="POST",
+      )
+      with urllib.request.urlopen(req) as resp:
+          print(json.loads(resp.read())["token"])
+      EOF
+      )
     - cd python
-    - TWINE_PASSWORD="${PYPI_TOKEN}"
-      TWINE_USERNAME="__token__"
+    - TWINE_USERNAME="__token__" TWINE_PASSWORD="$PYPI_MINT_TOKEN"
       python -m twine upload dist/*
   environment:
     name: pypi
