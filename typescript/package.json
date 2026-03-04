@@ -1,0 +1,62 @@
+{
+  "name": "@langchain/kserve",
+  "version": "0.1.0",
+  "description": "LangChain.js integration for KServe inference services",
+  "author": "bitkaio LLC",
+  "license": "MIT",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "src/"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "lint": "eslint src/ tests/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "VITEST_INTEGRATION=1 vitest run tests/integration",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
+  },
+  "dependencies": {
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@langchain/core": ">=0.3.0",
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "peerDependencies": {
+    "@langchain/core": ">=0.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "langchain",
+    "kserve",
+    "llm",
+    "ai",
+    "machine-learning",
+    "kubernetes",
+    "vllm",
+    "openai-compatible"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/bitkaio/langchain/kserve-provider"
+  }
+}

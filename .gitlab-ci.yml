@@ -1,0 +1,211 @@
+# ---------------------------------------------------------------------------
+# langchain-kserve — GitLab CI/CD
+#
+# Tag convention:
+#   py-X.Y.Z   → build & release the Python package (langchain-kserve X.Y.Z)
+#   ts-X.Y.Z   → build & release the TypeScript package (@langchain/kserve X.Y.Z)
+#
+# On the main branch: tests only (no publish).
+# On a matching tag:  test → build → publish to GitLab registry + public registry.
+# ---------------------------------------------------------------------------
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG =~ /^(py|ts)-\d+\.\d+\.\d+/
+
+stages:
+  - test
+  - build
+  - publish-gitlab
+  - publish-public
+
+# ---------------------------------------------------------------------------
+# Reusable rule anchors
+# ---------------------------------------------------------------------------
+
+.rules-python: &rules-python
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^py-\d+\.\d+\.\d+/
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.rules-python-tag-only: &rules-python-tag-only
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^py-\d+\.\d+\.\d+/
+
+.rules-typescript: &rules-typescript
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^ts-\d+\.\d+\.\d+/
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.rules-typescript-tag-only: &rules-typescript-tag-only
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^ts-\d+\.\d+\.\d+/
+
+# ---------------------------------------------------------------------------
+# Stage: test
+# ---------------------------------------------------------------------------
+
+python:test:
+  stage: test
+  image: python:3.11-slim
+  <<: *rules-python
+  before_script:
+    - pip install poetry
+    - cd python && poetry install --with dev
+  script:
+    - cd python && poetry run pytest tests/unit_tests/ -v
+  cache:
+    key: python-$CI_COMMIT_REF_SLUG
+    paths:
+      - python/.venv/
+
+typescript:test:
+  stage: test
+  image: node:20-slim
+  <<: *rules-typescript
+  before_script:
+    - npm install -g pnpm
+    - cd typescript && pnpm install --frozen-lockfile
+  script:
+    - cd typescript && pnpm test
+  cache:
+    key: typescript-$CI_COMMIT_REF_SLUG
+    paths:
+      - typescript/node_modules/
+
+# ---------------------------------------------------------------------------
+# Stage: build
+# ---------------------------------------------------------------------------
+
+python:build:
+  stage: build
+  image: python:3.11-slim
+  <<: *rules-python-tag-only
+  needs:
+    - python:test
+  before_script:
+    - pip install poetry
+  script:
+    # Extract version from tag (py-1.2.3 → 1.2.3)
+    - export PACKAGE_VERSION="${CI_COMMIT_TAG#py-}"
+    - echo "Building Python package version $PACKAGE_VERSION"
+    - cd python
+    - poetry version "$PACKAGE_VERSION"
+    - poetry build
+  artifacts:
+    paths:
+      - python/dist/
+    expire_in: 1 hour
+
+typescript:build:
+  stage: build
+  image: node:20-slim
+  <<: *rules-typescript-tag-only
+  needs:
+    - typescript:test
+  before_script:
+    - npm install -g pnpm
+    - cd typescript && pnpm install --frozen-lockfile
+  script:
+    # Extract version from tag (ts-1.2.3 → 1.2.3)
+    - export PACKAGE_VERSION="${CI_COMMIT_TAG#ts-}"
+    - echo "Building TypeScript package version $PACKAGE_VERSION"
+    - cd typescript
+    - npm version "$PACKAGE_VERSION" --no-git-tag-version --allow-same-version
+    - pnpm build
+  artifacts:
+    paths:
+      - typescript/dist/
+      - typescript/package.json
+    expire_in: 1 hour
+
+# ---------------------------------------------------------------------------
+# Stage: publish-gitlab
+# Publish to the GitLab package registry (PyPI + npm).
+# Uses CI_JOB_TOKEN — no external secrets required.
+# ---------------------------------------------------------------------------
+
+python:publish-gitlab:
+  stage: publish-gitlab
+  image: python:3.11-slim
+  <<: *rules-python-tag-only
+  needs:
+    - python:build
+  before_script:
+    - pip install twine
+  script:
+    - echo "Publishing Python package to GitLab registry"
+    - cd python
+    - TWINE_PASSWORD="${CI_JOB_TOKEN}"
+      TWINE_USERNAME="gitlab-ci-token"
+      python -m twine upload
+        --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
+        dist/*
+  environment:
+    name: gitlab-registry/python
+
+typescript:publish-gitlab:
+  stage: publish-gitlab
+  image: node:20-slim
+  <<: *rules-typescript-tag-only
+  needs:
+    - typescript:build
+  before_script:
+    - npm install -g pnpm
+  script:
+    - echo "Publishing TypeScript package to GitLab npm registry"
+    - cd typescript
+    # Configure GitLab npm registry for the @langchain scope
+    - |
+      cat >> .npmrc <<EOF
+      @langchain:registry=https://${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/
+      //${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}
+      EOF
+    - pnpm publish --no-git-checks --access public
+  environment:
+    name: gitlab-registry/typescript
+
+# ---------------------------------------------------------------------------
+# Stage: publish-public
+# Publish to PyPI and npmjs (public registries).
+# Requires protected CI/CD variables:
+#   PYPI_TOKEN  — PyPI API token (https://pypi.org/manage/account/token/)
+#   NPM_TOKEN   — npmjs access token (https://www.npmjs.com/settings/~/tokens)
+# ---------------------------------------------------------------------------
+
+python:publish-pypi:
+  stage: publish-public
+  image: python:3.11-slim
+  <<: *rules-python-tag-only
+  needs:
+    - python:publish-gitlab
+  before_script:
+    - pip install twine
+  script:
+    - echo "Publishing Python package to PyPI"
+    - cd python
+    - TWINE_PASSWORD="${PYPI_TOKEN}"
+      TWINE_USERNAME="__token__"
+      python -m twine upload dist/*
+  environment:
+    name: pypi
+
+typescript:publish-npmjs:
+  stage: publish-public
+  image: node:20-slim
+  <<: *rules-typescript-tag-only
+  needs:
+    - typescript:publish-gitlab
+  before_script:
+    - npm install -g pnpm
+  script:
+    - echo "Publishing TypeScript package to npmjs"
+    - cd typescript
+    - |
+      cat >> .npmrc <<EOF
+      //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+      EOF
+    - pnpm publish --no-git-checks --access public --registry https://registry.npmjs.org
+  environment:
+    name: npmjs
