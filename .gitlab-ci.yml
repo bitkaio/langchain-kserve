@@ -62,7 +62,7 @@ python:test:
 
 typescript:test:
   stage: test
-  image: node:20-slim
+  image: node:22-slim
   <<: *rules-typescript
   before_script:
     - npm install -g pnpm
@@ -100,7 +100,7 @@ python:build:
 
 typescript:build:
   stage: build
-  image: node:20-slim
+  image: node:22-slim
   <<: *rules-typescript-tag-only
   needs:
     - typescript:test
@@ -146,7 +146,7 @@ python:publish-gitlab:
 
 typescript:publish-gitlab:
   stage: publish-gitlab
-  image: node:20-slim
+  image: node:22-slim
   <<: *rules-typescript-tag-only
   needs:
     - typescript:build
@@ -207,7 +207,7 @@ python:publish-pypi:
 
 typescript:publish-npmjs:
   stage: publish-public
-  image: node:20-slim
+  image: node:22-slim
   <<: *rules-typescript-tag-only
   id_tokens:
     NPM_ID_TOKEN:

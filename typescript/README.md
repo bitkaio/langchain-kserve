@@ -20,7 +20,7 @@ npm install @bitkaio/langchain-kserve @langchain/core
 pnpm add @bitkaio/langchain-kserve @langchain/core
 ```
 
-**Requirements**: Node.js 18+ (uses native `fetch`)
+**Requirements**: Node.js 22.14+ (uses native `fetch`)
 
 ## Quick Start
 
