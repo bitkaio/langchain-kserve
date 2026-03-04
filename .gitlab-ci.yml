@@ -217,7 +217,7 @@ typescript:publish-npmjs:
   needs:
     - typescript:publish-gitlab
   before_script:
-    - npm install -g pnpm
+    - npm install -g pnpm npm@latest
   script:
     - echo "Publishing TypeScript package to npmjs"
     - cd typescript
