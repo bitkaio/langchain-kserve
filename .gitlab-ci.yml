@@ -202,8 +202,6 @@ python:publish-pypi:
       cd python
       TWINE_USERNAME="__token__" TWINE_PASSWORD="${PYPI_MINT_TOKEN}" \
         python -m twine upload dist/*
-  environment:
-    name: pypi
 
 typescript:publish-npmjs:
   stage: publish-public
