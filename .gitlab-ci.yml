@@ -222,6 +222,11 @@ typescript:publish-npmjs:
     - echo "Publishing TypeScript package to npmjs"
     - cd typescript
     - pnpm install --frozen-lockfile
+    # Wire the OIDC token into npm auth and publish with provenance attestation
+    - |
+      cat >> .npmrc <<EOF
+      //registry.npmjs.org/:_authToken=${NPM_ID_TOKEN}
+      EOF
     - pnpm publish --no-git-checks --access public --provenance --registry https://registry.npmjs.org
   environment:
     name: npmjs
