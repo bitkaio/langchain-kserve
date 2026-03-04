@@ -222,6 +222,6 @@ typescript:publish-npmjs:
     - echo "Publishing TypeScript package to npmjs"
     - cd typescript
     - pnpm install --frozen-lockfile
-    - npm publish --access public --provenance
+    - npm publish --access public --provenance --registry=https://registry.npmjs.org/
   environment:
     name: npmjs
