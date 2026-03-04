@@ -184,6 +184,7 @@ python:publish-pypi:
       aud: sigstore
   needs:
     - python:publish-gitlab
+    - python:build
   before_script:
     - pip install twine
     - apt-get update -qq && apt-get install -qq -y curl
@@ -216,6 +217,7 @@ typescript:publish-npmjs:
       aud: sigstore
   needs:
     - typescript:publish-gitlab
+    - typescript:build
   before_script:
     - npm install -g pnpm npm@latest
   script:
