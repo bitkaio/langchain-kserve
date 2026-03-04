@@ -9,7 +9,7 @@ Connect any LangChain chain, agent, or multi-agent framework to self-hosted mode
 | Package | Language | Registry | Description |
 |---------|----------|----------|-------------|
 | [`langchain-kserve`](./python) | Python | [![PyPI](https://img.shields.io/pypi/v/langchain-kserve)](https://pypi.org/project/langchain-kserve/) | LangChain integration (`ChatKServe`, `KServeLLM`) |
-| [`@langchain/kserve`](./typescript) | TypeScript | [![npm](https://img.shields.io/npm/v/@langchain/kserve)](https://www.npmjs.com/package/@langchain/kserve) | LangChain.js integration (`ChatKServe`, `KServeLLM`) |
+| [`@bitkaio/langchain-kserve`](./typescript) | TypeScript | [![npm](https://img.shields.io/npm/v/@bitkaio/langchain-kserve)](https://www.npmjs.com/package/@bitkaio/langchain-kserve) | LangChain.js integration (`ChatKServe`, `KServeLLM`) |
 
 ## Features
 
@@ -44,11 +44,11 @@ print(response.content)
 ### TypeScript
 
 ```bash
-npm install @langchain/kserve @langchain/core
+npm install @bitkaio/langchain-kserve @langchain/core
 ```
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 
 const llm = new ChatKServe({
   baseUrl: "https://qwen-coder.default.svc.cluster.local",

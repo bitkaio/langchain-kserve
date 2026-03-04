@@ -1,4 +1,4 @@
-# @langchain/kserve
+# @bitkaio/langchain-kserve
 
 LangChain.js integration for [KServe](https://kserve.github.io/website/) inference services.
 
@@ -15,9 +15,9 @@ Connect LangChain chains and agents to any model hosted on KServe — whether it
 ## Installation
 
 ```bash
-npm install @langchain/kserve @langchain/core
+npm install @bitkaio/langchain-kserve @langchain/core
 # or
-pnpm add @langchain/kserve @langchain/core
+pnpm add @bitkaio/langchain-kserve @langchain/core
 ```
 
 **Requirements**: Node.js 18+ (uses native `fetch`)
@@ -25,7 +25,7 @@ pnpm add @langchain/kserve @langchain/core
 ## Quick Start
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 
 const llm = new ChatKServe({
   baseUrl: "https://qwen-coder.my-cluster.example.com",
@@ -42,7 +42,7 @@ console.log(response.content);
 ### Basic invocation
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 const llm = new ChatKServe({
@@ -73,7 +73,7 @@ for await (const chunk of stream) {
 ### In a chain
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { StringOutputParser } from "@langchain/core/output_parsers";
 
@@ -102,7 +102,7 @@ const response = await chain.invoke({
 Tool calling requires the OpenAI-compatible protocol (vLLM, TGI, etc.). Models like Qwen2.5-Coder-Instruct support it natively.
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
@@ -143,7 +143,7 @@ if (result.tool_calls && result.tool_calls.length > 0) {
 Use `protocol: "v2"` for runtimes that expose the native KServe V2/Open Inference Protocol (e.g., Triton Inference Server):
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 
 const llm = new ChatKServe({
   baseUrl: "https://triton.my-cluster.example.com",
@@ -160,7 +160,7 @@ const result = await llm.invoke("Explain transformers in simple terms.");
 ### Base (non-chat) models with KServeLLM
 
 ```typescript
-import { KServeLLM } from "@langchain/kserve";
+import { KServeLLM } from "@bitkaio/langchain-kserve";
 
 const llm = new KServeLLM({
   baseUrl: "https://base-model.my-cluster.example.com",
@@ -260,7 +260,7 @@ const llm = new ChatKServe({
 ### DeepAgents integration
 
 ```typescript
-import { ChatKServe } from "@langchain/kserve";
+import { ChatKServe } from "@bitkaio/langchain-kserve";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
@@ -346,7 +346,7 @@ import {
   KServeModelNotFoundError,  // 404, model not loaded
   KServeInferenceError,   // 4xx/5xx during inference
   KServeTimeoutError,     // timeout exceeded
-} from "@langchain/kserve";
+} from "@bitkaio/langchain-kserve";
 ```
 
 ## Protocol auto-detection

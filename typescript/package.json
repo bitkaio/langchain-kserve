@@ -1,5 +1,5 @@
 {
-  "name": "@langchain/kserve",
+  "name": "@bitkaio/langchain-kserve",
   "version": "0.1.0",
   "description": "LangChain.js integration for KServe inference services",
   "author": "bitkaio LLC",
