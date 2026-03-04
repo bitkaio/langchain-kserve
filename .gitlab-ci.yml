@@ -3,7 +3,7 @@
 #
 # Tag convention:
 #   py-X.Y.Z   → build & release the Python package (langchain-kserve X.Y.Z)
-#   ts-X.Y.Z   → build & release the TypeScript package (@langchain/kserve X.Y.Z)
+#   ts-X.Y.Z   → build & release the TypeScript package (@bitkaio/langchain-kserve X.Y.Z)
 #
 # On the main branch: tests only (no publish).
 # On a matching tag:  test → build → publish to GitLab registry + public registry.
@@ -156,10 +156,10 @@ typescript:publish-gitlab:
   script:
     - echo "Publishing TypeScript package to GitLab npm registry"
     - cd typescript
-    # Configure GitLab npm registry for the @langchain scope
+    # Configure GitLab npm registry for the @bitkaio scope
     - |
       cat >> .npmrc <<EOF
-      @langchain:registry=https://${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/
+      @bitkaio:registry=https://${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/
       //${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}
       EOF
     - pnpm publish --no-git-checks --access public
@@ -195,6 +195,11 @@ typescript:publish-npmjs:
   stage: publish-public
   image: node:20-slim
   <<: *rules-typescript-tag-only
+  id_tokens:
+    NPM_ID_TOKEN:
+      aud: "npm:registry.npmjs.org"
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
   needs:
     - typescript:publish-gitlab
   before_script:
@@ -202,10 +207,6 @@ typescript:publish-npmjs:
   script:
     - echo "Publishing TypeScript package to npmjs"
     - cd typescript
-    - |
-      cat >> .npmrc <<EOF
-      //registry.npmjs.org/:_authToken=${NPM_TOKEN}
-      EOF
     - pnpm publish --no-git-checks --access public --registry https://registry.npmjs.org
   environment:
     name: npmjs
