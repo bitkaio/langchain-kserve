@@ -54,7 +54,7 @@ python:test:
     - pip install poetry
     - cd python && poetry install --with dev
   script:
-    - cd python && poetry run pytest tests/unit_tests/ -v
+    - poetry run pytest tests/unit_tests/ -v
   cache:
     key: python-$CI_COMMIT_REF_SLUG
     paths:
@@ -68,7 +68,7 @@ typescript:test:
     - npm install -g pnpm
     - cd typescript && pnpm install --frozen-lockfile
   script:
-    - cd typescript && pnpm test
+    - pnpm test
   cache:
     key: typescript-$CI_COMMIT_REF_SLUG
     paths:
