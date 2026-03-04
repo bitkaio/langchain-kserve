@@ -155,6 +155,7 @@ typescript:publish-gitlab:
   script:
     - echo "Publishing TypeScript package to GitLab npm registry"
     - cd typescript
+    - pnpm install --frozen-lockfile
     # Configure GitLab npm registry for the @bitkaio scope
     - |
       cat >> .npmrc <<EOF
@@ -220,6 +221,7 @@ typescript:publish-npmjs:
   script:
     - echo "Publishing TypeScript package to npmjs"
     - cd typescript
+    - pnpm install --frozen-lockfile
     - pnpm publish --no-git-checks --access public --registry https://registry.npmjs.org
   environment:
     name: npmjs
