@@ -270,4 +270,56 @@ describe("KServeClient", () => {
     expect(result.ok).toBe(true);
     expect(attempts).toBe(3);
   }, 10_000);
+
+  it("getModelInfo calls /v1/models/{model} and maps response", async () => {
+    const modelResponse = {
+      id: "my-model",
+      object: "model",
+      created: 1000,
+      owned_by: "user",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(modelResponse), { status: 200 })
+      )
+    );
+
+    const client = new KServeClient({ baseUrl: "http://my-model.local" });
+    const info = await client.getModelInfo("my-model");
+
+    expect(info.modelName).toBe("my-model");
+    expect(info.platform).toBe("openai-compat");
+    expect(info.raw).toEqual(modelResponse);
+    expect(info.modelVersion).toBeUndefined();
+  });
+
+  it("getModelInfo falls back to /v2/models/{model} on failure", async () => {
+    const v2ModelResponse = {
+      name: "my-model",
+      versions: ["1.0"],
+      platform: "triton",
+      inputs: [{ name: "text_input", datatype: "BYTES" }],
+      outputs: [{ name: "text_output", datatype: "BYTES" }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response("Not Found", { status: 404 })) // /v1/models fails
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify(v2ModelResponse), { status: 200 })
+        )
+    );
+
+    const client = new KServeClient({ baseUrl: "http://my-model.local" });
+    const info = await client.getModelInfo("my-model");
+
+    expect(info.modelName).toBe("my-model");
+    expect(info.modelVersion).toBe("1.0");
+    expect(info.platform).toBe("triton");
+    expect(info.inputs).toHaveLength(1);
+    expect(info.outputs).toHaveLength(1);
+    expect(info.raw).toEqual(v2ModelResponse);
+  });
 });

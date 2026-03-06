@@ -15,6 +15,8 @@ import type { BaseMessage } from "@langchain/core/messages";
 import {
   AIMessage,
   AIMessageChunk,
+  isHumanMessage,
+  isSystemMessage,
 } from "@langchain/core/messages";
 import type { ChatGeneration, Generation, LLMResult } from "@langchain/core/outputs";
 import {
@@ -25,7 +27,9 @@ import { v4 as uuidv4 } from "uuid";
 
 import { KServeInferenceError } from "./errors.js";
 import type {
+  ChatKServeCallOptions,
   KServeGenerationInfo,
+  OpenAIContentBlock,
   V2InferRequest,
   V2InferResponse,
   V2StreamChunk,
@@ -42,10 +46,14 @@ import { formatMessagesToPrompt } from "./utils.js";
  * Formats messages to a prompt string using the specified chat template,
  * then wraps it in the V2 tensor format.
  *
+ * Throws KServeInferenceError if tools or image_url content blocks are present,
+ * as these features require the OpenAI-compatible protocol.
+ *
  * @param messages       - LangChain messages to convert
  * @param params         - Generation parameters
  * @param chatTemplate   - Chat template format
  * @param customTemplate - Custom template string (if chatTemplate === "custom")
+ * @param options        - Optional call options (checked for tools)
  */
 export function buildV2ChatRequest(
   messages: BaseMessage[],
@@ -56,8 +64,38 @@ export function buildV2ChatRequest(
     stop?: string[];
   },
   chatTemplate: "chatml" | "llama" | "custom" = "chatml",
-  customTemplate?: string
+  customTemplate?: string,
+  options?: Partial<ChatKServeCallOptions>
 ): V2InferRequest {
+  // Tool calling is not supported with V2 protocol
+  if (options?.tools && options.tools.length > 0) {
+    throw new KServeInferenceError(
+      "Tool calling is only supported with the OpenAI-compatible protocol. " +
+      "Set protocol='openai' or use a runtime that exposes the OpenAI-compatible API (e.g., vLLM)."
+    );
+  }
+
+  // Vision / multimodal is not supported with V2 protocol
+  for (const msg of messages) {
+    if (
+      (isHumanMessage(msg) || isSystemMessage(msg)) &&
+      Array.isArray(msg.content)
+    ) {
+      const hasImageUrl = (msg.content as Array<unknown>).some(
+        (block) =>
+          typeof block === "object" &&
+          block !== null &&
+          (block as OpenAIContentBlock).type === "image_url"
+      );
+      if (hasImageUrl) {
+        throw new KServeInferenceError(
+          "Multimodal/vision messages are only supported with the OpenAI-compatible protocol. " +
+          "Set protocol='openai' to use vision features."
+        );
+      }
+    }
+  }
+
   const prompt = formatMessagesToPrompt(messages, chatTemplate, customTemplate);
   return buildV2TextRequest(prompt, params);
 }

@@ -110,6 +110,48 @@ class TestKServeLLMV2:
         assert result.generations[0][0].text == "The answer is 42."
 
 
+class TestKServeLLMTokenUsage:
+    @respx.mock
+    def test_llm_generate_llm_output_token_usage(self) -> None:
+        """LLMResult.llm_output['token_usage'] is populated when usage is in response."""
+        respx.post(f"{BASE_URL}/v1/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"text": "Hello world", "finish_reason": "stop"}],
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                    },
+                },
+            )
+        )
+
+        llm = make_llm()
+        result = llm._generate(["Say hello"])
+        assert result.llm_output is not None
+        assert result.llm_output["token_usage"]["prompt_tokens"] == 4
+        assert result.llm_output["token_usage"]["completion_tokens"] == 2
+        assert result.llm_output["token_usage"]["total_tokens"] == 6
+
+    @respx.mock
+    def test_llm_generate_no_usage_llm_output_none(self) -> None:
+        """LLMResult.llm_output is None when no usage field in response."""
+        respx.post(f"{BASE_URL}/v1/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"text": "Hello world", "finish_reason": "stop"}],
+                },
+            )
+        )
+
+        llm = make_llm()
+        result = llm._generate(["Say hello"])
+        assert result.llm_output is None
+
+
 class TestKServeLLMErrors:
     @respx.mock
     def test_401_raises_auth_error(self) -> None:

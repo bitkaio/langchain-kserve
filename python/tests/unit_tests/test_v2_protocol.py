@@ -164,3 +164,61 @@ class TestInferPath:
 
     def test_path_with_slash_in_name(self) -> None:
         assert infer_path("org/model") == "/v2/models/org/model/infer"
+
+
+# ---------------------------------------------------------------------------
+# New feature tests
+# ---------------------------------------------------------------------------
+
+
+class TestV2VisionGuard:
+    def test_v2_raises_on_image_url_content(self) -> None:
+        """messages_to_prompt raises KServeInferenceError when image_url content is present."""
+        msgs = [
+            HumanMessage(content=[
+                {"type": "text", "text": "What is in this image?"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+            ])
+        ]
+        with pytest.raises(KServeInferenceError, match="Multimodal/vision"):
+            messages_to_prompt(msgs)
+
+    def test_v2_text_only_content_list_works(self) -> None:
+        """messages_to_prompt with only text blocks does not raise."""
+        msgs = [
+            HumanMessage(content=[
+                {"type": "text", "text": "Hello!"},
+            ])
+        ]
+        # Should not raise
+        prompt = messages_to_prompt(msgs)
+        assert "Hello!" in prompt
+
+
+class TestV2StreamFinishReason:
+    def test_v2_stream_sequence_end_sets_finish_reason(self) -> None:
+        """A V2 streaming chunk with sequence_end=True produces finish_reason='stop'."""
+        import json as _json
+        from langchain_kserve._v2_protocol import _parse_v2_stream_bytes
+
+        ndjson_line = _json.dumps({
+            "outputs": [{"name": "text_output", "data": ["final token"]}],
+            "parameters": {"sequence_end": True},
+        })
+        chunks = list(_parse_v2_stream_bytes(ndjson_line.encode("utf-8"), "my-model"))
+        assert len(chunks) == 1
+        assert chunks[0].generation_info is not None
+        assert chunks[0].generation_info["finish_reason"] == "stop"
+
+    def test_v2_stream_no_sequence_end_finish_reason_none(self) -> None:
+        """A V2 streaming chunk without sequence_end produces finish_reason=None."""
+        import json as _json
+        from langchain_kserve._v2_protocol import _parse_v2_stream_bytes
+
+        ndjson_line = _json.dumps({
+            "outputs": [{"name": "text_output", "data": ["token"]}],
+        })
+        chunks = list(_parse_v2_stream_bytes(ndjson_line.encode("utf-8"), "my-model"))
+        assert len(chunks) == 1
+        assert chunks[0].generation_info is not None
+        assert chunks[0].generation_info["finish_reason"] is None

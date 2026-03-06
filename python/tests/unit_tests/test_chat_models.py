@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict
 from unittest.mock import MagicMock
@@ -12,7 +13,7 @@ import respx
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from langchain_kserve import ChatKServe
+from langchain_kserve import ChatKServe, KServeModelInfo
 from langchain_kserve._common import (
     KServeAuthenticationError,
     KServeInferenceError,
@@ -384,6 +385,69 @@ class TestChatKServeErrors:
 # ---------------------------------------------------------------------------
 # Auth header tests
 # ---------------------------------------------------------------------------
+
+
+class TestChatKServeNewFeatures:
+    @respx.mock
+    def test_v2_with_tools_raises_error(self) -> None:
+        """ChatKServe with v2 protocol and bound tools raises KServeInferenceError."""
+        respx.post(f"{BASE_URL}/v2/models/{MODEL}/infer").mock(
+            return_value=httpx.Response(
+                200,
+                json={"outputs": [{"data": ["ok"]}]},
+            )
+        )
+
+        tool_schema = {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        llm = make_llm(protocol="v2").bind_tools([tool_schema])
+        with pytest.raises(KServeInferenceError, match="Tool calling is only supported"):
+            llm._generate([HumanMessage(content="Search for something")])
+
+    @respx.mock
+    def test_get_model_info_openai(self) -> None:
+        """get_model_info() with OpenAI protocol fetches /v1/models/{model}."""
+        respx.get(f"{BASE_URL}/v1/models/{MODEL}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": MODEL, "object": "model", "created": 1234567890},
+            )
+        )
+
+        llm = make_llm(protocol="openai")
+        info = asyncio.run(llm.get_model_info())
+        assert info["model_name"] == MODEL
+        assert info["raw"]["id"] == MODEL
+
+    @respx.mock
+    def test_get_model_info_v2(self) -> None:
+        """get_model_info() with V2 protocol fetches /v2/models/{model}."""
+        respx.get(f"{BASE_URL}/v2/models/{MODEL}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": MODEL,
+                    "version": "1",
+                    "platform": "onnxruntime",
+                    "inputs": [{"name": "text_input"}],
+                    "outputs": [{"name": "text_output"}],
+                },
+            )
+        )
+
+        llm = make_llm(protocol="v2")
+        info = asyncio.run(llm.get_model_info())
+        assert info["model_name"] == MODEL
+        assert info["model_version"] == "1"
+        assert info["platform"] == "onnxruntime"
+        assert info["inputs"] is not None
+        assert info["outputs"] is not None
 
 
 class TestChatKServeAuth:

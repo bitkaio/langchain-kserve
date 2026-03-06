@@ -2,14 +2,19 @@
 
 LangChain.js integration for [KServe](https://kserve.github.io/website/) inference services.
 
-Connect LangChain chains and agents to any model hosted on KServe — whether it's a vLLM-served Qwen2.5-Coder behind an Istio ingress, a Triton-served custom model, or a TGI-served Llama — with full streaming, tool calling, and production-grade connection handling.
+Connect LangChain chains and agents to any model hosted on KServe — whether it's a vLLM-served Qwen2.5-Coder behind an Istio ingress, a Triton-served custom model, or a TGI-served Llama — with full streaming, tool calling, vision, and production-grade connection handling.
 
 ## Features
 
 - **Two model classes**: `ChatKServe` for chat/instruct models, `KServeLLM` for base completion models
 - **Dual protocol support**: OpenAI-compatible API (`/v1/chat/completions`) and V2 Inference Protocol (`/v2/models/{model}/infer`), with auto-detection
 - **Full streaming**: SSE for OpenAI-compat, NDJSON for V2
-- **Tool calling**: Passes LangChain tool definitions through OpenAI function-calling schema
+- **Tool calling**: Full OpenAI function-calling format with `tool_choice`, `parallel_tool_calls`, and proper `invalid_tool_calls` handling for malformed responses
+- **Vision / multimodal**: Send images alongside text via OpenAI content blocks
+- **Token usage tracking**: `llmOutput` and `generationInfo` populated from vLLM responses, including streaming
+- **Logprobs**: Optional per-token log-probabilities in `generationInfo`
+- **Finish reason**: Always propagated in `generationInfo` and `response_metadata`
+- **Model introspection**: `getModelInfo()` returns unified `KServeModelInfo` for both protocols
 - **Production-ready**: TLS/CA bundles, bearer token auth, async token providers (K8s service account tokens), exponential backoff with jitter, 120s default timeout for cold starts
 
 ## Installation
@@ -20,7 +25,7 @@ npm install @bitkaio/langchain-kserve @langchain/core
 pnpm add @bitkaio/langchain-kserve @langchain/core
 ```
 
-**Requirements**: Node.js 22.14+ (uses native `fetch`)
+**Requirements**: Node.js 22.14+
 
 ## Quick Start
 
@@ -97,9 +102,44 @@ const response = await chain.invoke({
 });
 ```
 
+### Token usage tracking
+
+Token usage is available in both `llmOutput` (request-level) and `generationInfo` (per-generation):
+
+```typescript
+const result = await llm._generate([new HumanMessage("Hello")], {});
+
+// Request-level
+console.log(result.llmOutput);
+// { tokenUsage: { promptTokens: 5, completionTokens: 12, totalTokens: 17 } }
+
+// Per-generation
+const info = result.generations[0].generationInfo;
+console.log(info?.tokenUsage);    // { promptTokens: 5, completionTokens: 12, totalTokens: 17 }
+console.log(info?.finishReason);  // "stop"
+```
+
+### Logprobs
+
+```typescript
+import { ChatKServe } from "@bitkaio/langchain-kserve";
+
+const llm = new ChatKServe({
+  baseUrl: "https://qwen-coder.my-cluster.example.com",
+  modelName: "qwen2.5-coder-32b-instruct",
+  protocol: "openai",
+  logprobs: true,
+  topLogprobs: 5,
+});
+
+const result = await llm.invoke("Hello");
+const info = result.response_metadata;
+console.log(info.logprobs); // { content: [{ token: "Hi", logprob: -0.3, top_logprobs: [...] }] }
+```
+
 ### Tool calling
 
-Tool calling requires the OpenAI-compatible protocol (vLLM, TGI, etc.). Models like Qwen2.5-Coder-Instruct support it natively.
+Tool calling requires the OpenAI-compatible protocol (vLLM, TGI, etc.).
 
 ```typescript
 import { ChatKServe } from "@bitkaio/langchain-kserve";
@@ -109,24 +149,20 @@ import { z } from "zod";
 const llm = new ChatKServe({
   baseUrl: "https://qwen-coder.my-cluster.example.com",
   modelName: "qwen2.5-coder-32b-instruct",
-  protocol: "openai", // pin to openai-compat for tool calling
+  protocol: "openai",
+  parallelToolCalls: true,
 });
 
 const searchTool = tool(
-  async ({ query }) => {
-    // your implementation
-    return `Results for: ${query}`;
-  },
+  async ({ query }) => `Results for: ${query}`,
   {
     name: "search_codebase",
     description: "Search the codebase for relevant code",
-    schema: z.object({
-      query: z.string().describe("The search query"),
-    }),
+    schema: z.object({ query: z.string() }),
   }
 );
 
-const llmWithTools = llm.bindTools([searchTool]);
+const llmWithTools = llm.bindTools([searchTool], { toolChoice: "auto" });
 
 const result = await llmWithTools.invoke(
   "Find all usages of the AuthService class"
@@ -134,8 +170,74 @@ const result = await llmWithTools.invoke(
 
 if (result.tool_calls && result.tool_calls.length > 0) {
   console.log("Tool call:", result.tool_calls[0]);
-  // { name: 'search_codebase', args: { query: 'AuthService' }, id: '...' }
 }
+
+// Malformed arguments from the model are captured in invalid_tool_calls
+if (result.invalid_tool_calls && result.invalid_tool_calls.length > 0) {
+  console.log("Invalid call:", result.invalid_tool_calls[0]);
+}
+```
+
+### Vision / multimodal
+
+Send images alongside text. Works with OpenAI-compatible runtimes that support vision (e.g., vLLM with a multimodal model).
+
+```typescript
+import { ChatKServe } from "@bitkaio/langchain-kserve";
+import { HumanMessage } from "@langchain/core/messages";
+import { readFile } from "node:fs/promises";
+
+const llm = new ChatKServe({
+  baseUrl: "https://llava.my-cluster.example.com",
+  modelName: "llava-1.6",
+  protocol: "openai",
+});
+
+// Base64-encoded image (preferred for cluster-internal use)
+const imageData = await readFile("chart.png", { encoding: "base64" });
+const message = new HumanMessage({
+  content: [
+    { type: "text", text: "Describe what you see in this chart:" },
+    {
+      type: "image_url",
+      image_url: {
+        url: `data:image/png;base64,${imageData}`,
+        detail: "high",
+      },
+    },
+  ],
+});
+
+const response = await llm.invoke([message]);
+console.log(response.content);
+```
+
+URL-based images are also supported (the model pod fetches the image):
+
+```typescript
+const message = new HumanMessage({
+  content: [
+    { type: "text", text: "What's in this image?" },
+    { type: "image_url", image_url: { url: "https://example.com/image.jpg" } },
+  ],
+});
+```
+
+### Model introspection
+
+```typescript
+import { ChatKServe } from "@bitkaio/langchain-kserve";
+
+const llm = new ChatKServe({
+  baseUrl: "https://qwen-coder.my-cluster.example.com",
+  modelName: "qwen2.5-coder-32b-instruct",
+});
+
+const info = await llm.getModelInfo();
+
+console.log(info.modelName);    // "qwen2.5-coder-32b-instruct"
+console.log(info.platform);     // "openai-compat" or V2 platform string
+console.log(info.raw);          // full response from the endpoint
 ```
 
 ### V2 Inference Protocol
@@ -149,13 +251,13 @@ const llm = new ChatKServe({
   baseUrl: "https://triton.my-cluster.example.com",
   modelName: "llama-3-8b-instruct",
   protocol: "v2",
-  // Chat template format — "chatml" (default) works for Qwen models,
-  // "llama" for Llama 2/3 style [INST] format
   chatTemplate: "llama",
 });
 
 const result = await llm.invoke("Explain transformers in simple terms.");
 ```
+
+> **Note:** Tool calling and vision are not supported on V2. Attempting either throws a `KServeInferenceError` immediately (before any HTTP call) with a clear message.
 
 ### Base (non-chat) models with KServeLLM
 
@@ -171,6 +273,10 @@ const llm = new KServeLLM({
 });
 
 const completion = await llm.invoke("Once upon a time");
+
+// Token usage (from streaming or non-streaming)
+const result = await llm.generate(["Once upon a time"]);
+console.log(result.llmOutput); // { tokenUsage: {...} } if vLLM, else undefined
 ```
 
 ### Environment variable configuration
@@ -189,14 +295,6 @@ All constructor options can be set via environment variables:
 export KSERVE_BASE_URL=https://qwen-coder.my-cluster.example.com
 export KSERVE_MODEL_NAME=qwen2.5-coder-32b-instruct
 export KSERVE_API_KEY=my-bearer-token
-```
-
-```typescript
-// No constructor args needed — reads from env
-const llm = new ChatKServe({
-  baseUrl: process.env.KSERVE_BASE_URL!,
-  modelName: process.env.KSERVE_MODEL_NAME!,
-});
 ```
 
 ### Authentication
@@ -220,7 +318,6 @@ const llm = new ChatKServe({
   baseUrl: "https://my-model.cluster.example.com",
   modelName: "my-model",
   tokenProvider: async () => {
-    // Read fresh token on each request
     const token = await readFile(
       "/var/run/secrets/kubernetes.io/serviceaccount/token",
       "utf-8"
@@ -232,15 +329,11 @@ const llm = new ChatKServe({
 
 ### Custom TLS / CA bundle
 
-For self-signed certificates or internal CAs common in Kubernetes clusters:
-
 ```typescript
 const llm = new ChatKServe({
   baseUrl: "https://my-model.internal.example.com",
   modelName: "my-model",
   caBundle: "/etc/ssl/certs/my-internal-ca.pem",
-  // or disable verification entirely (not recommended for production)
-  // verifySsl: false,
 });
 ```
 
@@ -250,9 +343,7 @@ const llm = new ChatKServe({
 const llm = new ChatKServe({
   baseUrl: "https://my-model.cluster.example.com",
   modelName: "my-model",
-  // Generous timeout for cold starts (KServe scales from 0)
-  timeout: 300_000, // 5 minutes
-  // Retries with exponential backoff + jitter
+  timeout: 300_000,  // 5 minutes for cold starts
   maxRetries: 5,
 });
 ```
@@ -264,22 +355,12 @@ import { ChatKServe } from "@bitkaio/langchain-kserve";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
-// Define your tools
 const readFile = tool(
   async ({ path }) => { /* ... */ },
   {
     name: "read_file",
     description: "Read a file from the codebase",
     schema: z.object({ path: z.string() }),
-  }
-);
-
-const writeFile = tool(
-  async ({ path, content }) => { /* ... */ },
-  {
-    name: "write_file",
-    description: "Write content to a file",
-    schema: z.object({ path: z.string(), content: z.string() }),
   }
 );
 
@@ -290,13 +371,9 @@ const llm = new ChatKServe({
   streaming: true,
 });
 
-// Use with DeepAgents or any LangChain agent framework
 import { Agent } from "deepagents";
 
-const agent = new Agent({
-  llm,
-  tools: [readFile, writeFile],
-});
+const agent = new Agent({ llm, tools: [readFile] });
 
 const result = await agent.invoke({
   input: "Refactor the authentication module to use JWT tokens",
@@ -325,29 +402,66 @@ Extends `BaseChatModel`. Use for chat/instruct models.
 | `topP` | `number` | — | Top-p nucleus sampling |
 | `stop` | `string[]` | — | Stop sequences |
 | `streaming` | `boolean` | `false` | Enable streaming |
+| `logprobs` | `boolean` | — | Return per-token log-probabilities (OpenAI-compat only) |
+| `topLogprobs` | `number` | — | Number of top logprobs per token (OpenAI-compat only) |
+| `parallelToolCalls` | `boolean` | — | Allow multiple tool calls in one turn (OpenAI-compat only) |
 | `timeout` | `number` | `120000` | Request timeout (ms) |
 | `maxRetries` | `number` | `3` | Max retry attempts |
 | `chatTemplate` | `"chatml" \| "llama" \| "custom"` | `"chatml"` | Template for V2 protocol |
 | `customChatTemplate` | `string` | — | Custom template string |
 
+#### Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `invoke(input)` | `Promise<AIMessage>` | Single-turn generation |
+| `stream(input)` | `AsyncIterable<AIMessageChunk>` | Streaming generation |
+| `bindTools(tools, kwargs?)` | `Runnable` | Bind tools for function calling |
+| `getModelInfo()` | `Promise<KServeModelInfo>` | Fetch model metadata from endpoint |
+
 ### `KServeLLM`
 
-Extends `BaseLLM`. Use for base/completion models.
+Extends `BaseLLM`. Use for base/completion models. Same options as `ChatKServe`, minus `chatTemplate` and `customChatTemplate`.
 
-Same options as `ChatKServe`, minus `chatTemplate` and `customChatTemplate`.
+### `KServeModelInfo`
+
+```typescript
+interface KServeModelInfo {
+  modelName: string;
+  modelVersion?: string;
+  platform?: string;
+  inputs?: Array<Record<string, unknown>>;
+  outputs?: Array<Record<string, unknown>>;
+  raw: Record<string, unknown>;
+}
+```
 
 ### Error classes
 
 ```typescript
 import {
-  KServeError,            // base class
-  KServeConnectionError,  // network/DNS failures
-  KServeAuthenticationError, // 401/403
-  KServeModelNotFoundError,  // 404, model not loaded
-  KServeInferenceError,   // 4xx/5xx during inference
-  KServeTimeoutError,     // timeout exceeded
+  KServeError,                // base class
+  KServeConnectionError,      // network/DNS failures
+  KServeAuthenticationError,  // 401/403
+  KServeModelNotFoundError,   // 404, model not loaded
+  KServeInferenceError,       // 4xx/5xx during inference, or V2 unsupported feature
+  KServeTimeoutError,         // timeout exceeded
 } from "@bitkaio/langchain-kserve";
 ```
+
+## Protocol Capability Matrix
+
+| Feature | OpenAI-compat | V2 |
+|---|:---:|:---:|
+| Text generation | ✅ | ✅ |
+| Streaming | ✅ | ✅ |
+| Tool calling | ✅ | ❌ |
+| Vision / multimodal | ✅ | ❌ |
+| Logprobs | ✅ | ❌ |
+| Token usage tracking | ✅ | ❌ |
+| Finish reason | ✅ | partial |
+
+Attempting tool calling or vision with V2 throws `KServeInferenceError` immediately (before any HTTP call) with a clear message.
 
 ## Protocol auto-detection
 

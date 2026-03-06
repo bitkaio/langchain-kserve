@@ -10,7 +10,12 @@ Connect any LangChain chain, agent, or multi-agent framework to self-hosted mode
 - **`KServeLLM`** — `BaseLLM` for base completion models
 - **Dual protocol** — OpenAI-compatible (`/v1/chat/completions`) and V2 Inference Protocol (`/v2/models/{model}/infer`), auto-detected
 - **Full streaming** — sync and async, SSE for OpenAI-compat, chunked transfer for V2
-- **Tool calling** — pass tools through in OpenAI function-calling format
+- **Tool calling** — full OpenAI function-calling format with `tool_choice`, `parallel_tool_calls`, and proper `invalid_tool_calls` handling
+- **Vision / multimodal** — send images alongside text via OpenAI content blocks
+- **Token usage tracking** — `llm_output` and `generation_info` populated from vLLM responses, including streaming
+- **Logprobs** — optional per-token log-probabilities in `generation_info`
+- **Finish reason** — always propagated in `generation_info`
+- **Model introspection** — `get_model_info()` returns unified `KServeModelInfo` for both protocols
 - **Production-grade** — TLS/CA bundle, bearer token + dynamic token provider (K8s SA tokens), exponential backoff retries, generous cold-start timeouts
 
 ## Installation
@@ -52,6 +57,10 @@ print(response.content)
 | `top_p` | `float` | `1.0` | Nucleus sampling |
 | `stop` | `List[str]` | `None` | Stop sequences |
 | `streaming` | `bool` | `False` | Default streaming mode |
+| `logprobs` | `bool` | `None` | Return per-token log-probabilities (OpenAI-compat only) |
+| `top_logprobs` | `int` | `None` | Number of top logprobs per token (OpenAI-compat only) |
+| `tool_choice` | `str \| dict` | `None` | Tool selection strategy: `"auto"`, `"required"`, `"none"`, or specific function |
+| `parallel_tool_calls` | `bool` | `None` | Allow the model to call multiple tools in one turn |
 | `timeout` | `int` | `120` | Request timeout in seconds |
 | `max_retries` | `int` | `3` | Retry attempts |
 
@@ -125,6 +134,48 @@ response = chain.invoke({"language": "Python", "input": "Implement a LRU cache."
 print(response.content)
 ```
 
+### Token usage tracking
+
+Token usage is available in both `llm_output` (request-level) and `generation_info` (per-generation):
+
+```python
+result = llm._generate([HumanMessage(content="Hello")])
+
+# Request-level (on ChatResult)
+print(result.llm_output)
+# {"token_usage": {"prompt_tokens": 5, "completion_tokens": 12, "total_tokens": 17}, "model_name": "..."}
+
+# Per-generation
+gen_info = result.generations[0].generation_info
+print(gen_info["prompt_tokens"])     # 5
+print(gen_info["completion_tokens"]) # 12
+print(gen_info["finish_reason"])     # "stop"
+```
+
+Token usage is also captured from the final streaming chunk (vLLM sends it when `stream_options.include_usage=True`):
+
+```python
+chunks = list(llm.stream("Hello"))
+last_chunk = chunks[-1]
+print(last_chunk.generation_info)  # {"token_usage": {...}}
+```
+
+### Logprobs
+
+```python
+llm = ChatKServe(
+    base_url="...",
+    model_name="...",
+    logprobs=True,
+    top_logprobs=5,
+    protocol="openai",
+)
+
+response = llm.invoke("Hello")
+print(response.response_metadata["logprobs"])
+# {"tokens": [...], "token_logprobs": [...], "top_logprobs": [...]}
+```
+
 ### Tool calling
 
 Tool calling works when using the OpenAI-compatible endpoint (e.g., vLLM, TGI).
@@ -142,15 +193,76 @@ llm = ChatKServe(
     base_url="https://qwen-coder.default.svc.cluster.local",
     model_name="qwen2.5-coder-32b-instruct",
     protocol="openai",
+    tool_choice="auto",
+    parallel_tool_calls=True,
 )
 
 llm_with_tools = llm.bind_tools([get_weather])
-response = llm_with_tools.invoke("What's the weather in Berlin?")
+response = llm_with_tools.invoke("What's the weather in Berlin and Paris?")
 
-# If the model calls the tool:
 if response.tool_calls:
-    tool_call = response.tool_calls[0]
-    print(f"Tool: {tool_call['name']}, Args: {tool_call['args']}")
+    for tc in response.tool_calls:
+        print(f"Tool: {tc['name']}, Args: {tc['args']}")
+
+# Malformed arguments land in invalid_tool_calls instead of crashing
+if response.invalid_tool_calls:
+    for itc in response.invalid_tool_calls:
+        print(f"Invalid call: {itc['name']}, raw args: {itc['args']}")
+```
+
+### Vision / multimodal
+
+Pass images alongside text using OpenAI content blocks. Works with OpenAI-compatible runtimes that support vision (e.g., vLLM with a multimodal model).
+
+```python
+from langchain_core.messages import HumanMessage
+from langchain_kserve import ChatKServe
+import base64, pathlib
+
+llm = ChatKServe(
+    base_url="https://llava.default.svc.cluster.local",
+    model_name="llava-1.6",
+    protocol="openai",
+)
+
+# Base64-encoded image (preferred for cluster-internal use)
+image_data = base64.b64encode(pathlib.Path("chart.png").read_bytes()).decode()
+message = HumanMessage(content=[
+    {"type": "text", "text": "Describe what you see in this chart:"},
+    {
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:image/png;base64,{image_data}",
+            "detail": "high",
+        },
+    },
+])
+
+response = llm.invoke([message])
+print(response.content)
+```
+
+URL-based images are also supported (the model pod fetches the image):
+
+```python
+message = HumanMessage(content=[
+    {"type": "text", "text": "What's in this image?"},
+    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+])
+```
+
+### Model introspection
+
+```python
+import asyncio
+from langchain_kserve import ChatKServe
+
+llm = ChatKServe(base_url="...", model_name="qwen2.5-coder-32b-instruct")
+info = asyncio.run(llm.get_model_info())
+
+print(info["model_name"])    # "qwen2.5-coder-32b-instruct"
+print(info["platform"])      # "openai-compat" or V2 platform string
+print(info["raw"])           # full response from the endpoint
 ```
 
 ### Forcing V2 Inference Protocol
@@ -221,7 +333,6 @@ llm = ChatKServe(
     protocol="openai",
 )
 
-# Use with any LangChain-compatible agent framework
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -245,6 +356,20 @@ When `protocol="auto"` (the default), `langchain-kserve` probes the endpoint:
 2. Otherwise fall back to V2 Inference Protocol
 
 The detected protocol is cached per instance to avoid repeated probes.
+
+## Protocol Capability Matrix
+
+| Feature | OpenAI-compat | V2 |
+|---|:---:|:---:|
+| Text generation | ✅ | ✅ |
+| Streaming | ✅ | ✅ |
+| Tool calling | ✅ | ❌ |
+| Vision / multimodal | ✅ | ❌ |
+| Logprobs | ✅ | ❌ |
+| Token usage tracking | ✅ | ❌ |
+| Finish reason | ✅ | partial |
+
+Attempting tool calling or vision with V2 raises `KServeInferenceError` immediately (before any HTTP call) with a clear message.
 
 ## Error Handling
 
@@ -272,6 +397,7 @@ except KServeTimeoutError:
     print("Inference timed out (model may be scaling up)")
 except KServeInferenceError as e:
     print(f"Inference error: {e}")
+    # Also raised for unsupported features on V2 (tools, vision)
 ```
 
 ## Base Completion Models (`KServeLLM`)
@@ -293,6 +419,10 @@ print(text)
 # Streaming
 for chunk in llm.stream("Once upon a time"):
     print(chunk, end="", flush=True)
+
+# Token usage
+result = llm.generate(["The quick brown fox"])
+print(result.llm_output)  # {"token_usage": {...}}
 ```
 
 ## Development

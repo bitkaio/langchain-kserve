@@ -81,6 +81,15 @@ export interface ChatKServeInput extends KServeBaseInput, BaseChatModelParams {
    * Must produce a single string from the messages array.
    */
   customChatTemplate?: string;
+
+  /** Whether to return logprobs with each token. */
+  logprobs?: boolean;
+
+  /** Number of top logprobs to return per token (requires logprobs=true). */
+  topLogprobs?: number;
+
+  /** Whether to allow the model to make parallel tool calls. */
+  parallelToolCalls?: boolean;
 }
 
 /** Constructor input for KServeLLM */
@@ -102,6 +111,12 @@ export interface ChatKServeCallOptions {
   tools?: OpenAITool[];
   /** Tool choice strategy */
   toolChoice?: string | OpenAIToolChoice;
+  /** Whether to allow parallel tool calls */
+  parallelToolCalls?: boolean;
+  /** Whether to return logprobs */
+  logprobs?: boolean;
+  /** Number of top logprobs to return per token */
+  topLogprobs?: number;
   /** AbortSignal for cancellation */
   signal?: AbortSignal;
 }
@@ -181,7 +196,7 @@ export interface V2StreamChunk {
 /** OpenAI chat message */
 export interface OpenAIChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | null | OpenAIContentBlock[];
   name?: string;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
@@ -226,6 +241,9 @@ export interface OpenAIChatRequest {
   stream?: boolean;
   tools?: OpenAITool[];
   tool_choice?: OpenAIToolChoice;
+  parallel_tool_calls?: boolean;
+  logprobs?: boolean;
+  top_logprobs?: number;
   stream_options?: {
     include_usage?: boolean;
   };
@@ -251,7 +269,7 @@ export interface OpenAIChatChoice {
     tool_calls?: OpenAIToolCall[];
   };
   finish_reason: string | null;
-  logprobs: null;
+  logprobs?: OpenAILogprobs | null;
 }
 
 /** OpenAI token usage */
@@ -291,6 +309,7 @@ export interface OpenAIChatStreamChoice {
   index: number;
   delta: OpenAIChatStreamDelta;
   finish_reason: string | null;
+  logprobs?: OpenAILogprobs | null;
 }
 
 /** OpenAI streaming chunk */
@@ -366,4 +385,54 @@ export interface KServeGenerationInfo {
     completionTokens: number;
     totalTokens: number;
   };
+  logprobs?: OpenAILogprobs | null;
 }
+
+// ============================================================
+// Model introspection
+// ============================================================
+
+/** Metadata returned from getModelInfo() */
+export interface KServeModelInfo {
+  modelName: string;
+  modelVersion?: string;
+  platform?: string;
+  inputs?: Array<Record<string, unknown>>;
+  outputs?: Array<Record<string, unknown>>;
+  raw: Record<string, unknown>;
+}
+
+// ============================================================
+// Logprobs types
+// ============================================================
+
+/** A single token logprob entry */
+export interface OpenAILogprobItem {
+  token: string;
+  logprob: number;
+  top_logprobs: Array<{ token: string; logprob: number }>;
+}
+
+/** Logprobs for a chat completion choice */
+export interface OpenAILogprobs {
+  content: OpenAILogprobItem[] | null;
+}
+
+// ============================================================
+// Multimodal / vision content block types
+// ============================================================
+
+/** A text content block for multimodal messages */
+export interface OpenAITextContentBlock {
+  type: "text";
+  text: string;
+}
+
+/** An image_url content block for multimodal messages */
+export interface OpenAIImageContentBlock {
+  type: "image_url";
+  image_url: { url: string; detail?: "low" | "high" | "auto" };
+}
+
+/** Union of supported OpenAI content block types */
+export type OpenAIContentBlock = OpenAITextContentBlock | OpenAIImageContentBlock;

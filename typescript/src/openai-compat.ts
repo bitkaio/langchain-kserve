@@ -12,6 +12,7 @@ import {
   AIMessage,
   AIMessageChunk,
 } from "@langchain/core/messages";
+import type { InvalidToolCall } from "@langchain/core/messages/tool";
 import type { ChatGeneration, LLMResult } from "@langchain/core/outputs";
 import { ChatGenerationChunk } from "@langchain/core/outputs";
 
@@ -27,6 +28,7 @@ import type {
   OpenAICompletionStreamChunk,
   OpenAITool,
   OpenAIToolCall,
+  OpenAIUsage,
 } from "./types.js";
 import { convertMessagesToOpenAI } from "./utils.js";
 
@@ -79,6 +81,17 @@ export function buildChatRequest(
       // Cast needed because our union type is wider than OpenAIChatRequest expects
       request.tool_choice = options.toolChoice as typeof request.tool_choice;
     }
+    if (options?.parallelToolCalls !== undefined) {
+      request.parallel_tool_calls = options.parallelToolCalls;
+    }
+  }
+
+  // Logprobs
+  if (options?.logprobs !== undefined) {
+    request.logprobs = options.logprobs;
+  }
+  if (options?.topLogprobs !== undefined) {
+    request.top_logprobs = options.topLogprobs;
   }
 
   // Request usage in streaming chunks (vLLM supports this)
@@ -121,17 +134,49 @@ export function parseChatResponse(
     };
   }
 
+  generationInfo.logprobs = choice.logprobs ?? null;
+
   let aiMessage: AIMessage;
 
   if (toolCalls && toolCalls.length > 0) {
+    const validToolCalls: Array<{
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+      type: "tool_call";
+    }> = [];
+    const invalidToolCalls: InvalidToolCall[] = [];
+
+    for (const tc of toolCalls) {
+      try {
+        const parsed: unknown = JSON.parse(tc.function.arguments);
+        let args: Record<string, unknown>;
+        if (typeof parsed === "object" && parsed !== null) {
+          args = parsed as Record<string, unknown>;
+        } else {
+          args = { input: parsed };
+        }
+        validToolCalls.push({
+          id: tc.id,
+          name: tc.function.name,
+          args,
+          type: "tool_call" as const,
+        });
+      } catch (e) {
+        invalidToolCalls.push({
+          id: tc.id,
+          name: tc.function.name,
+          args: tc.function.arguments,
+          error: e instanceof Error ? e.message : String(e),
+          type: "invalid_tool_call" as const,
+        });
+      }
+    }
+
     aiMessage = new AIMessage({
       content: msg.content ?? "",
-      tool_calls: toolCalls.map((tc: OpenAIToolCall) => ({
-        id: tc.id,
-        name: tc.function.name,
-        args: parseToolCallArgs(tc.function.arguments),
-        type: "tool_call" as const,
-      })),
+      tool_calls: validToolCalls,
+      invalid_tool_calls: invalidToolCalls,
     });
   } else {
     aiMessage = new AIMessage({ content: msg.content ?? "" });
@@ -144,21 +189,6 @@ export function parseChatResponse(
   };
 }
 
-/**
- * Parse tool call arguments string to an object.
- * Falls back to wrapping in `{ input: ... }` if JSON.parse fails.
- */
-function parseToolCallArgs(argsString: string): Record<string, unknown> {
-  try {
-    const parsed: unknown = JSON.parse(argsString);
-    if (typeof parsed === "object" && parsed !== null) {
-      return parsed as Record<string, unknown>;
-    }
-    return { input: parsed };
-  } catch {
-    return { input: argsString };
-  }
-}
 
 /**
  * Parse a streaming OpenAI chat chunk and return a ChatGenerationChunk.
@@ -194,6 +224,11 @@ export function parseChatStreamChunk(
       completionTokens: chunk.usage.completion_tokens,
       totalTokens: chunk.usage.total_tokens,
     };
+  }
+
+  // Logprobs (per-chunk, when requested)
+  if (choice.logprobs !== undefined) {
+    generationInfo.logprobs = choice.logprobs ?? null;
   }
 
   // Handle streaming tool calls
@@ -292,9 +327,11 @@ export function parseCompletionResponse(
 
 /**
  * Parse a streaming OpenAI completion chunk.
- * Returns the text delta, or null if nothing to emit.
+ * Returns the text delta and optional usage, or null if nothing to emit.
  */
-export function parseCompletionStreamChunk(raw: string): string | null {
+export function parseCompletionStreamChunk(
+  raw: string
+): { text: string; usage?: OpenAIUsage } | null {
   let chunk: OpenAICompletionStreamChunk;
   try {
     chunk = JSON.parse(raw) as OpenAICompletionStreamChunk;
@@ -303,5 +340,12 @@ export function parseCompletionStreamChunk(raw: string): string | null {
   }
 
   const text = chunk.choices?.[0]?.text;
-  return text ?? null;
+  if (text === undefined || text === null) {
+    // Could be a usage-only final chunk (empty choices)
+    if (chunk.usage) {
+      return { text: "", usage: chunk.usage };
+    }
+    return null;
+  }
+  return { text, usage: chunk.usage };
 }

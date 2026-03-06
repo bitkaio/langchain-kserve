@@ -48,7 +48,22 @@ def messages_to_prompt(
 
     Returns:
         A single formatted prompt string ready to feed to the model.
+
+    Raises:
+        KServeInferenceError: If any message contains image_url content (not
+            supported by the V2 protocol).
     """
+    # Guard against multimodal/vision content
+    for msg in messages:
+        if isinstance(msg.content, list):
+            for block in msg.content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    raise KServeInferenceError(
+                        "Multimodal/vision messages are only supported with the "
+                        "OpenAI-compatible protocol. Set protocol='openai' to use "
+                        "vision features."
+                    )
+
     if chat_template is not None:
         # Caller is responsible for rendering Jinja2 templates externally.
         # For now fall through to ChatML if template rendering is not available.
@@ -309,9 +324,17 @@ def _parse_v2_stream_bytes(
         if outputs:
             value = outputs[0].get("data", [""])[0]
             token = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+            # Check for sequence_end parameter indicating end of generation
+            parameters = obj.get("parameters", {})
+            sequence_end = parameters.get("sequence_end", False)
+            finish_reason: Optional[str] = "stop" if sequence_end else None
             yield ChatGenerationChunk(
                 message=AIMessageChunk(content=token),
-                generation_info={"model": model_name, "protocol": "v2"},
+                generation_info={
+                    "model": model_name,
+                    "protocol": "v2",
+                    "finish_reason": finish_reason,
+                },
             )
             yielded = True
 
@@ -323,9 +346,16 @@ def _parse_v2_stream_bytes(
             if outputs:
                 value = outputs[0].get("data", [""])[0]
                 token = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                parameters = obj.get("parameters", {})
+                sequence_end = parameters.get("sequence_end", False)
+                finish_reason_single: Optional[str] = "stop" if sequence_end else None
                 yield ChatGenerationChunk(
                     message=AIMessageChunk(content=token),
-                    generation_info={"model": model_name, "protocol": "v2"},
+                    generation_info={
+                        "model": model_name,
+                        "protocol": "v2",
+                        "finish_reason": finish_reason_single,
+                    },
                 )
         except json.JSONDecodeError:
             logger.warning("Could not parse V2 stream response: %s", text[:200])

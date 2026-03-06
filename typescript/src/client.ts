@@ -17,7 +17,7 @@ import {
   KServeTimeoutError,
   mapHttpErrorToKServeError,
 } from "./errors.js";
-import type { KServeClientConfig, RequestOptions } from "./types.js";
+import type { KServeClientConfig, KServeModelInfo, RequestOptions } from "./types.js";
 
 // ============================================================
 // SSE parser
@@ -446,5 +446,84 @@ export class KServeClient {
   /** Override the cached detected protocol */
   setProtocol(protocol: "openai" | "v2"): void {
     this.detectedProtocol = protocol;
+  }
+
+  // --------------------------------------------------------
+  // GET request helper (for model info)
+  // --------------------------------------------------------
+
+  /**
+   * Make a GET request and return the parsed JSON body.
+   * Throws on non-2xx responses.
+   */
+  async get<T>(path: string, signal?: AbortSignal): Promise<T> {
+    const url = `${this.config.baseUrl}${path}`;
+    const authHeaders = await this.buildAuthHeaders();
+
+    const response = await this.fetchWithTimeout(
+      url,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          ...authHeaders,
+        },
+      },
+      signal
+    );
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw mapHttpErrorToKServeError(
+        response.status,
+        `HTTP ${response.status} from ${url}: ${text}`
+      );
+    }
+
+    return (await response.json()) as T;
+  }
+
+  // --------------------------------------------------------
+  // Model introspection
+  // --------------------------------------------------------
+
+  /**
+   * Retrieve metadata about a model from the KServe endpoint.
+   *
+   * Tries the OpenAI-compatible GET /v1/models/{modelName} endpoint first.
+   * On any failure, falls back to the V2 GET /v2/models/{modelName} endpoint.
+   *
+   * @param modelName - The model name to look up
+   */
+  async getModelInfo(modelName: string): Promise<KServeModelInfo> {
+    const encoded = encodeURIComponent(modelName);
+
+    // Try OpenAI-compat first
+    try {
+      const response = await this.get<Record<string, unknown>>(
+        `/v1/models/${encoded}`
+      );
+      return {
+        modelName: (response.id as string | undefined) ?? modelName,
+        modelVersion: undefined,
+        platform: "openai-compat",
+        raw: response,
+      };
+    } catch {
+      // Fall through to V2
+    }
+
+    // Try V2
+    const response = await this.get<Record<string, unknown>>(
+      `/v2/models/${encoded}`
+    );
+    return {
+      modelName: (response.name as string | undefined) ?? modelName,
+      modelVersion: (response.versions as string[] | undefined)?.[0],
+      platform: response.platform as string | undefined,
+      inputs: response.inputs as Array<Record<string, unknown>> | undefined,
+      outputs: response.outputs as Array<Record<string, unknown>> | undefined,
+      raw: response,
+    };
   }
 }

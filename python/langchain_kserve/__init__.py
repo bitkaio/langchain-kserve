@@ -5,6 +5,7 @@ from langchain_kserve._common import (
     KServeConnectionError,
     KServeError,
     KServeInferenceError,
+    KServeModelInfo,
     KServeModelNotFoundError,
     KServeTimeoutError,
 )
@@ -22,6 +23,8 @@ __all__ = [
     "KServeModelNotFoundError",
     "KServeInferenceError",
     "KServeTimeoutError",
+    # Metadata
+    "KServeModelInfo",
 ]
 
 __version__ = "0.1.0"

@@ -16,7 +16,7 @@ import type {
   StructuredToolInterface,
 } from "@langchain/core/tools";
 
-import type { OpenAIChatMessage, OpenAITool } from "./types.js";
+import type { OpenAIChatMessage, OpenAIContentBlock, OpenAITool } from "./types.js";
 
 // ============================================================
 // Message content helpers
@@ -32,6 +32,66 @@ function messageContentToString(content: MessageContent): string {
     return content;
   }
   // Array of content blocks — concatenate text blocks
+  return content
+    .map((block) => {
+      if (typeof block === "string") return block;
+      if (block.type === "text") return block.text;
+      return "";
+    })
+    .join("");
+}
+
+// ============================================================
+// Multimodal content helpers
+// ============================================================
+
+/**
+ * Convert a LangChain MessageContent value to an OpenAI-compatible content value.
+ *
+ * If the content is a plain string, it is returned as-is.
+ * If the content is an array of blocks and any block is an image_url type,
+ * the full array is returned as OpenAIContentBlock[].
+ * If the content is a text-only array, a joined string is returned.
+ *
+ * @param content - LangChain message content
+ * @returns OpenAI-compatible content value
+ */
+export function messageContentToOpenAI(
+  content: MessageContent
+): string | OpenAIContentBlock[] {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  // Check if any block is an image_url
+  const hasImage = content.some(
+    (block) => typeof block !== "string" && block.type === "image_url"
+  );
+
+  if (hasImage) {
+    return content.map((block): OpenAIContentBlock => {
+      if (typeof block === "string") {
+        return { type: "text", text: block };
+      }
+      if (block.type === "text") {
+        return { type: "text", text: block.text };
+      }
+      if (block.type === "image_url") {
+        const imgBlock = block as {
+          type: "image_url";
+          image_url: { url: string; detail?: "low" | "high" | "auto" };
+        };
+        return {
+          type: "image_url",
+          image_url: imgBlock.image_url,
+        };
+      }
+      // Other block types — convert to text
+      return { type: "text", text: String(block) };
+    });
+  }
+
+  // Text-only array — join into a string
   return content
     .map((block) => {
       if (typeof block === "string") return block;
@@ -58,14 +118,14 @@ export function convertMessagesToOpenAI(
     if (isSystemMessage(msg)) {
       return {
         role: "system",
-        content: messageContentToString(msg.content),
+        content: messageContentToOpenAI(msg.content),
       };
     }
 
     if (isHumanMessage(msg)) {
       return {
         role: "user",
-        content: messageContentToString(msg.content),
+        content: messageContentToOpenAI(msg.content),
       };
     }
 

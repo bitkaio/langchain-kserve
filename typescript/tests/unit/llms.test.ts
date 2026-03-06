@@ -1,6 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { KServeLLM } from "../../src/llms.js";
 
+// ============================================================
+// SSE helper for streaming tests
+// ============================================================
+
+function makeSseStreamResponse(chunks: object[]): Response {
+  const lines = chunks.map((c) => `data: ${JSON.stringify(c)}`);
+  lines.push("data: [DONE]");
+  const body = lines.join("\n") + "\n";
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(body));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
 function makeCompletionResponse(text: string) {
   return {
     id: "cmpl-test",
@@ -154,5 +172,43 @@ describe("KServeLLM", () => {
     expect(result.generations).toHaveLength(2);
     expect(result.generations[0][0].text).toBe("output1");
     expect(result.generations[1][0].text).toBe("output2");
+  });
+
+  it("streaming aggregates token usage from final chunk", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 200 })) // protocol detection
+      .mockResolvedValueOnce(
+        makeSseStreamResponse([
+          {
+            id: "cmpl-s1",
+            object: "text_completion",
+            created: 0,
+            model: "test-model",
+            choices: [{ index: 0, text: "Hello", finish_reason: null }],
+          },
+          {
+            id: "cmpl-s2",
+            object: "text_completion",
+            created: 0,
+            model: "test-model",
+            choices: [{ index: 0, text: " world", finish_reason: "stop" }],
+            usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+          },
+        ])
+      );
+    vi.stubGlobal("fetch", mockFetch);
+
+    const llm = new KServeLLM({
+      baseUrl: "http://localhost:8080",
+      modelName: "test-model",
+      streaming: true,
+    });
+
+    const result = await llm.generate(["my prompt"]);
+    expect(result.generations[0][0].text).toBe("Hello world");
+    expect(result.llmOutput?.tokenUsage?.totalTokens).toBe(7);
+    expect(result.llmOutput?.tokenUsage?.promptTokens).toBe(5);
+    expect(result.llmOutput?.tokenUsage?.completionTokens).toBe(2);
   });
 });

@@ -11,6 +11,7 @@ import {
   parseV2TextStreamChunk,
   getV2InferPath,
 } from "../../src/v2-protocol.js";
+import { KServeInferenceError } from "../../src/errors.js";
 
 describe("buildV2TextRequest", () => {
   it("builds a valid V2 request with prompt", () => {
@@ -262,5 +263,44 @@ describe("getV2InferPath", () => {
 
   it("URL-encodes model names with special characters", () => {
     expect(getV2InferPath("my model/v1")).toBe("/v2/models/my%20model%2Fv1/infer");
+  });
+});
+
+// ============================================================
+// New feature tests
+// ============================================================
+
+describe("buildV2ChatRequest — tools and vision guards", () => {
+  it("throws KServeInferenceError when tools are provided", () => {
+    const messages = [new HumanMessage("Hello")];
+    const tools = [
+      {
+        type: "function" as const,
+        function: { name: "search", parameters: {} },
+      },
+    ];
+    expect(() =>
+      buildV2ChatRequest(messages, {}, "chatml", undefined, { tools })
+    ).toThrow(KServeInferenceError);
+  });
+
+  it("throws KServeInferenceError for image_url content blocks", () => {
+    const messages = [
+      new HumanMessage({
+        content: [
+          { type: "text", text: "Look:" },
+          {
+            type: "image_url",
+            image_url: { url: "https://example.com/img.png" },
+          },
+        ],
+      }),
+    ];
+    expect(() => buildV2ChatRequest(messages, {})).toThrow(KServeInferenceError);
+  });
+
+  it("does not throw for regular text messages without tools", () => {
+    const messages = [new HumanMessage("Hello!")];
+    expect(() => buildV2ChatRequest(messages, {})).not.toThrow();
   });
 });

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import httpx
 from langchain_core.messages import (
@@ -19,7 +19,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.messages.tool import ToolCall
+from langchain_core.messages.tool import ToolCall, invalid_tool_call
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 from langchain_kserve._common import (
@@ -34,6 +34,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Message serialisation
 # ---------------------------------------------------------------------------
+
+
+def _message_content_to_openai(
+    content: Any,
+) -> Union[str, List[Dict[str, Any]]]:
+    """Convert a message content value to the OpenAI API format.
+
+    Args:
+        content: Either a plain string or a list of content blocks.
+
+    Returns:
+        A string if all blocks are plain text, otherwise a list of OpenAI
+        content block dicts.
+    """
+    if isinstance(content, str):
+        return content
+    # List of content blocks
+    result: List[Dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, str):
+            result.append({"type": "text", "text": block})
+        elif isinstance(block, dict):
+            if block.get("type") == "text":
+                result.append(block)
+            elif block.get("type") == "image_url":
+                result.append(block)
+            else:
+                # Unknown block type — convert to text
+                result.append({"type": "text", "text": str(block)})
+        else:
+            result.append({"type": "text", "text": str(block)})
+    return result
 
 
 def messages_to_openai_dicts(messages: Sequence[BaseMessage]) -> List[Dict[str, Any]]:
@@ -51,7 +83,7 @@ def messages_to_openai_dicts(messages: Sequence[BaseMessage]) -> List[Dict[str, 
         if isinstance(msg, SystemMessage):
             result.append({"role": "system", "content": _get_text_content(msg)})
         elif isinstance(msg, HumanMessage):
-            result.append({"role": "user", "content": _get_text_content(msg)})
+            result.append({"role": "user", "content": _message_content_to_openai(msg.content)})
         elif isinstance(msg, AIMessage):
             d: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
             if msg.tool_calls:
@@ -84,7 +116,7 @@ def messages_to_openai_dicts(messages: Sequence[BaseMessage]) -> List[Dict[str, 
 def _get_text_content(msg: BaseMessage) -> str:
     if isinstance(msg.content, str):
         return msg.content
-    # Handle list of content blocks (multimodal)
+    # Handle list of content blocks (multimodal) — extract text only
     parts: List[str] = []
     for block in msg.content:  # type: ignore[union-attr]
         if isinstance(block, str):
@@ -109,6 +141,10 @@ def build_chat_request(
     stream: bool,
     tools: Optional[List[Dict[str, Any]]] = None,
     extra_kwargs: Optional[Dict[str, Any]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+    parallel_tool_calls: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Build a ``/v1/chat/completions`` request body.
 
@@ -122,6 +158,10 @@ def build_chat_request(
         stream: Whether to stream the response.
         tools: OpenAI-format tool schemas (for tool calling).
         extra_kwargs: Additional parameters merged into the request body.
+        logprobs: Whether to return log probabilities.
+        top_logprobs: Number of top log probabilities to return per token.
+        tool_choice: Tool choice strategy (e.g. ``"auto"``, ``"required"``).
+        parallel_tool_calls: Whether to allow parallel tool calls.
 
     Returns:
         JSON-serialisable request body dict.
@@ -139,6 +179,16 @@ def build_chat_request(
         body["stop"] = stop
     if tools:
         body["tools"] = tools
+    if stream:
+        body["stream_options"] = {"include_usage": True}
+    if logprobs is not None:
+        body["logprobs"] = logprobs
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
+    if parallel_tool_calls is not None:
+        body["parallel_tool_calls"] = parallel_tool_calls
     if extra_kwargs:
         body.update(extra_kwargs)
     return body
@@ -153,6 +203,8 @@ def build_completion_request(
     stop: Optional[List[str]],
     stream: bool,
     extra_kwargs: Optional[Dict[str, Any]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build a ``/v1/completions`` request body.
 
@@ -165,6 +217,8 @@ def build_completion_request(
         stop: Stop sequences.
         stream: Whether to stream.
         extra_kwargs: Extra parameters merged into the body.
+        logprobs: Whether to return log probabilities.
+        top_logprobs: Number of top log probabilities to return per token.
 
     Returns:
         JSON-serialisable request body dict.
@@ -180,6 +234,10 @@ def build_completion_request(
         body["max_tokens"] = max_tokens
     if stop:
         body["stop"] = stop
+    if logprobs is not None:
+        body["logprobs"] = logprobs
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
     if extra_kwargs:
         body.update(extra_kwargs)
     return body
@@ -221,41 +279,73 @@ def parse_chat_response(
     message = choice.get("message", {})
     content: str = message.get("content") or ""
     finish_reason: Optional[str] = choice.get("finish_reason")
+    logprobs_data: Optional[Any] = choice.get("logprobs")
 
     tool_calls: List[ToolCall] = []
+    invalid_tool_calls: List[Any] = []
     raw_tool_calls = message.get("tool_calls") or []
     for tc in raw_tool_calls:
         fn = tc.get("function", {})
+        raw_args = fn.get("arguments", "{}")
         try:
-            args = json.loads(fn.get("arguments", "{}"))
-        except json.JSONDecodeError:
-            args = {}
-        tool_calls.append(
-            ToolCall(
-                id=tc.get("id", ""),
-                name=fn.get("name", ""),
-                args=args,
+            args = json.loads(raw_args)
+            tool_calls.append(
+                ToolCall(
+                    id=tc.get("id", ""),
+                    name=fn.get("name", ""),
+                    args=args,
+                )
             )
-        )
+        except json.JSONDecodeError as e:
+            invalid_tool_calls.append(
+                invalid_tool_call(
+                    name=fn.get("name", ""),
+                    args=raw_args,
+                    id=tc.get("id", ""),
+                    error=str(e),
+                )
+            )
 
-    ai_message = AIMessage(content=content, tool_calls=tool_calls)
+    ai_message = AIMessage(
+        content=content,
+        tool_calls=tool_calls,
+        invalid_tool_calls=invalid_tool_calls,
+    )
 
-    usage = data.get("usage", {})
+    usage = data.get("usage")
+    token_usage: Optional[Dict[str, Any]] = None
+    if usage:
+        token_usage = {
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }
+
     generation_info: Dict[str, Any] = {
         "model": model_name,
         "protocol": protocol_used,
         "finish_reason": finish_reason,
-        "prompt_tokens": usage.get("prompt_tokens"),
-        "completion_tokens": usage.get("completion_tokens"),
-        "total_tokens": usage.get("total_tokens"),
+        "prompt_tokens": usage.get("prompt_tokens") if usage else None,
+        "completion_tokens": usage.get("completion_tokens") if usage else None,
+        "total_tokens": usage.get("total_tokens") if usage else None,
+        "logprobs": logprobs_data,
     }
+    if token_usage:
+        generation_info["token_usage"] = token_usage
+
+    llm_output: Optional[Dict[str, Any]] = None
+    if token_usage:
+        llm_output = {"token_usage": token_usage, "model_name": model_name}
 
     return ChatResult(
-        generations=[ChatGeneration(message=ai_message, generation_info=generation_info)]
+        generations=[ChatGeneration(message=ai_message, generation_info=generation_info)],
+        llm_output=llm_output,
     )
 
 
-def parse_completion_response(response: httpx.Response, model_name: str) -> str:
+def parse_completion_response(
+    response: httpx.Response, model_name: str
+) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Parse a non-streaming ``/v1/completions`` response.
 
     Args:
@@ -263,7 +353,7 @@ def parse_completion_response(response: httpx.Response, model_name: str) -> str:
         model_name: Model name (for logging).
 
     Returns:
-        The generated text string.
+        A tuple of ``(generated_text, usage_dict_or_none)``.
 
     Raises:
         KServeInferenceError: If the response format is unexpected.
@@ -277,7 +367,16 @@ def parse_completion_response(response: httpx.Response, model_name: str) -> str:
     if not choices:
         raise KServeInferenceError(f"No choices in response: {data}")
 
-    return choices[0].get("text", "")
+    text: str = choices[0].get("text", "")
+    usage = data.get("usage")
+    usage_dict: Optional[Dict[str, Any]] = None
+    if usage:
+        usage_dict = {
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }
+    return text, usage_dict
 
 
 # ---------------------------------------------------------------------------
@@ -412,11 +511,32 @@ def _parse_sse_chat_line(
         return None
 
     choices = data.get("choices", [])
+    usage = data.get("usage")
+
+    # Handle vLLM final usage-only chunk: choices is empty but usage is present
+    if not choices and usage:
+        token_usage = {
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }
+        return ChatGenerationChunk(
+            message=AIMessageChunk(content=""),
+            generation_info={
+                "model": model_name,
+                "protocol": protocol_used,
+                "finish_reason": None,
+                "token_usage": token_usage,
+            },
+        )
+
     if not choices:
         return None
+
     delta = choices[0].get("delta", {})
     content: str = delta.get("content") or ""
     finish_reason = choices[0].get("finish_reason")
+    logprobs_data: Optional[Any] = choices[0].get("logprobs")
 
     # Handle tool call deltas
     tool_call_chunks = delta.get("tool_calls")
@@ -425,6 +545,7 @@ def _parse_sse_chat_line(
         "model": model_name,
         "protocol": protocol_used,
         "finish_reason": finish_reason,
+        "logprobs": logprobs_data,
     }
 
     return ChatGenerationChunk(

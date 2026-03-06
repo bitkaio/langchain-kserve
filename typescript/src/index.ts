@@ -20,6 +20,7 @@ export type {
   KServeClientConfig,
   RequestOptions,
   KServeGenerationInfo,
+  KServeModelInfo,
   // V2 protocol types
   V2InferRequest,
   V2InferResponse,
@@ -34,6 +35,13 @@ export type {
   OpenAIToolCall,
   OpenAIToolChoice,
   OpenAIUsage,
+  // Logprobs types
+  OpenAILogprobs,
+  OpenAILogprobItem,
+  // Multimodal types
+  OpenAIContentBlock,
+  OpenAITextContentBlock,
+  OpenAIImageContentBlock,
 } from "./types.js";
 
 // Error classes
@@ -56,4 +64,5 @@ export {
   formatMessagesToPrompt,
   formatChatML,
   formatLlama,
+  messageContentToOpenAI,
 } from "./utils.js";

@@ -12,6 +12,7 @@ import {
   formatChatML,
   formatLlama,
   formatMessagesToPrompt,
+  messageContentToOpenAI,
 } from "../../src/utils.js";
 
 // ============================================================
@@ -210,5 +211,53 @@ describe("formatMessagesToPrompt", () => {
     expect(result).toContain("MESSAGES:");
     expect(result).toContain("END");
     expect(result).toContain("user");
+  });
+});
+
+// ============================================================
+// messageContentToOpenAI
+// ============================================================
+
+describe("messageContentToOpenAI", () => {
+  it("returns string for plain string input", () => {
+    const result = messageContentToOpenAI("Hello, world!");
+    expect(result).toBe("Hello, world!");
+  });
+
+  it("returns array when image_url block present", () => {
+    const content = [
+      { type: "text" as const, text: "Look at this:" },
+      {
+        type: "image_url" as const,
+        image_url: { url: "https://example.com/image.png" },
+      },
+    ];
+    const result = messageContentToOpenAI(content);
+    expect(Array.isArray(result)).toBe(true);
+    const arr = result as Array<{ type: string }>;
+    expect(arr).toHaveLength(2);
+    expect(arr[0].type).toBe("text");
+    expect(arr[1].type).toBe("image_url");
+  });
+
+  it("returns string for text-only array", () => {
+    const content = [
+      { type: "text" as const, text: "Hello" },
+      { type: "text" as const, text: " world" },
+    ];
+    const result = messageContentToOpenAI(content);
+    expect(typeof result).toBe("string");
+    expect(result).toBe("Hello world");
+  });
+
+  it("converts HumanMessage with image_url content to array in OpenAI messages", () => {
+    const msg = new HumanMessage({
+      content: [
+        { type: "text", text: "Describe:" },
+        { type: "image_url", image_url: { url: "https://example.com/img.jpg" } },
+      ],
+    });
+    const msgs = convertMessagesToOpenAI([msg]);
+    expect(Array.isArray(msgs[0].content)).toBe(true);
   });
 });

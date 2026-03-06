@@ -173,7 +173,22 @@ class TestParseCompletionResponse:
             200,
             json={"choices": [{"text": "the output", "finish_reason": "stop"}]},
         )
-        assert parse_completion_response(response, "model") == "the output"
+        text, usage = parse_completion_response(response, "model")
+        assert text == "the output"
+        assert usage is None
+
+    def test_parses_usage(self) -> None:
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [{"text": "hello", "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            },
+        )
+        text, usage = parse_completion_response(response, "model")
+        assert text == "hello"
+        assert usage is not None
+        assert usage["total_tokens"] == 7
 
     def test_empty_choices_raises(self) -> None:
         response = httpx.Response(200, json={"choices": []})
@@ -200,3 +215,264 @@ class TestSSEParsing:
 
     def test_parse_completion_line_done(self) -> None:
         assert _parse_sse_completion_line("data: [DONE]") is None
+
+
+# ---------------------------------------------------------------------------
+# New feature tests
+# ---------------------------------------------------------------------------
+
+
+class TestTokenUsage:
+    def test_parse_chat_response_llm_output_token_usage(self) -> None:
+        """parse_chat_response with usage field populates llm_output["token_usage"]."""
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        )
+        result = parse_chat_response(response, "my-model")
+        assert result.llm_output is not None
+        assert result.llm_output["token_usage"]["prompt_tokens"] == 10
+        assert result.llm_output["token_usage"]["completion_tokens"] == 5
+        assert result.llm_output["token_usage"]["total_tokens"] == 15
+        assert result.llm_output["model_name"] == "my-model"
+
+    def test_parse_chat_response_no_usage_llm_output_none(self) -> None:
+        """parse_chat_response without usage field returns llm_output as None."""
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Hi"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+        result = parse_chat_response(response, "my-model")
+        assert result.llm_output is None
+
+    def test_build_chat_request_stream_options_when_streaming(self) -> None:
+        """stream=True adds stream_options.include_usage=True."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=True,
+        )
+        assert body.get("stream_options") == {"include_usage": True}
+
+    def test_build_chat_request_no_stream_options_when_not_streaming(self) -> None:
+        """stream=False does not add stream_options."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+        )
+        assert "stream_options" not in body
+
+    def test_parse_sse_usage_only_chunk(self) -> None:
+        """vLLM final usage-only chunk (choices=[]) returns a ChatGenerationChunk with token_usage."""
+        import json as _json
+        payload = _json.dumps({
+            "choices": [],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11},
+        })
+        line = f"data: {payload}"
+        chunk = _parse_sse_chat_line(line, "m", "openai")
+        assert chunk is not None
+        assert chunk.message.content == ""
+        assert chunk.generation_info is not None
+        assert chunk.generation_info["token_usage"]["prompt_tokens"] == 8
+        assert chunk.generation_info["token_usage"]["total_tokens"] == 11
+
+
+class TestLogprobs:
+    def test_build_chat_request_logprobs_params(self) -> None:
+        """logprobs=True and top_logprobs=5 appear in request body."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            logprobs=True,
+            top_logprobs=5,
+        )
+        assert body["logprobs"] is True
+        assert body["top_logprobs"] == 5
+
+    def test_build_chat_request_logprobs_omitted_when_none(self) -> None:
+        """logprobs=None means logprobs key not in body."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+        )
+        assert "logprobs" not in body
+
+    def test_parse_chat_response_logprobs(self) -> None:
+        """Response with choices[0].logprobs populates generation_info['logprobs']."""
+        logprobs_data = {"tokens": ["Hi"], "token_logprobs": [-0.5]}
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Hi"},
+                        "finish_reason": "stop",
+                        "logprobs": logprobs_data,
+                    }
+                ],
+                "usage": {},
+            },
+        )
+        result = parse_chat_response(response, "m")
+        assert result.generations[0].generation_info is not None
+        assert result.generations[0].generation_info["logprobs"] == logprobs_data
+
+
+class TestToolCallParsing:
+    def test_parse_chat_response_invalid_tool_call_json(self) -> None:
+        """Tool call with invalid JSON args populates AIMessage.invalid_tool_calls."""
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_bad",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "my_func",
+                                        "arguments": "not valid json{",
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {},
+            },
+        )
+        result = parse_chat_response(response, "m")
+        ai_msg = result.generations[0].message
+        assert isinstance(ai_msg, AIMessage)
+        assert len(ai_msg.tool_calls) == 0
+        assert len(ai_msg.invalid_tool_calls) == 1
+        assert ai_msg.invalid_tool_calls[0]["name"] == "my_func"
+        assert ai_msg.invalid_tool_calls[0]["args"] == "not valid json{"
+
+    def test_build_chat_request_tool_choice_and_parallel(self) -> None:
+        """tool_choice='required' and parallel_tool_calls=True appear in request body."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            tool_choice="required",
+            parallel_tool_calls=True,
+        )
+        assert body["tool_choice"] == "required"
+        assert body["parallel_tool_calls"] is True
+
+    def test_build_chat_request_tool_choice_omitted_when_none(self) -> None:
+        """tool_choice=None means key absent from body."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+        )
+        assert "tool_choice" not in body
+        assert "parallel_tool_calls" not in body
+
+
+class TestVisionContent:
+    def test_messages_with_image_url_preserved(self) -> None:
+        """HumanMessage with image_url block produces content as list in OpenAI dict."""
+        from langchain_core.messages import HumanMessage as HM
+        msg = HM(content=[
+            {"type": "text", "text": "Describe this image:"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+        ])
+        result = messages_to_openai_dicts([msg])
+        assert result[0]["role"] == "user"
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        assert len(content) == 2
+        assert content[0] == {"type": "text", "text": "Describe this image:"}
+        assert content[1] == {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+
+
+class TestFinishReason:
+    def test_parse_chat_response_finish_reason_always_present(self) -> None:
+        """finish_reason is always in generation_info, even if None."""
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Hi"},
+                        # no finish_reason key
+                    }
+                ],
+                "usage": {},
+            },
+        )
+        result = parse_chat_response(response, "m")
+        assert "finish_reason" in result.generations[0].generation_info  # type: ignore[index]
+        assert result.generations[0].generation_info["finish_reason"] is None  # type: ignore[index]
+
+    def test_parse_chat_response_finish_reason_stop(self) -> None:
+        """finish_reason='stop' is correctly propagated."""
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {},
+            },
+        )
+        result = parse_chat_response(response, "m")
+        assert result.generations[0].generation_info["finish_reason"] == "stop"  # type: ignore[index]

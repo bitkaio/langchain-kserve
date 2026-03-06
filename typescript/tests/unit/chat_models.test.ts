@@ -267,4 +267,30 @@ describe("ChatKServe", () => {
     expect(params.base_url).toBe("http://localhost:8080");
     expect(params.temperature).toBe(0.5);
   });
+
+  it("getModelInfo returns KServeModelInfo for OpenAI-compat protocol", async () => {
+    const mockModelResponse = {
+      id: "test-model",
+      object: "model",
+      created: 0,
+      owned_by: "test",
+    };
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(mockModelResponse), { status: 200 })
+      );
+    vi.stubGlobal("fetch", mockFetch);
+
+    const model = new ChatKServe({
+      baseUrl: "http://localhost:8080",
+      modelName: "test-model",
+      protocol: "openai",
+    });
+
+    const info = await model.getModelInfo();
+    expect(info.modelName).toBe("test-model");
+    expect(info.platform).toBe("openai-compat");
+    expect(info.raw).toEqual(mockModelResponse);
+  });
 });

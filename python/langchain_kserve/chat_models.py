@@ -31,9 +31,13 @@ from pydantic import ConfigDict, Field, SecretStr, model_validator
 
 from langchain_kserve._common import (
     KServeConnectionError,
+    KServeInferenceError,
+    KServeModelInfo,
     async_request_with_retry,
     build_async_client,
     build_sync_client,
+    fetch_model_info_openai,
+    fetch_model_info_v2,
     request_with_retry,
 )
 from langchain_kserve._openai_compat import (
@@ -130,6 +134,10 @@ class ChatKServe(BaseChatModel):
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
     stop: Optional[List[str]] = Field(default=None)
     streaming: bool = Field(default=False)
+    logprobs: Optional[bool] = Field(default=None)
+    top_logprobs: Optional[int] = Field(default=None)
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(default=None)
+    parallel_tool_calls: Optional[bool] = Field(default=None)
 
     # ------------------------------------------------------------------
     # Connection behaviour
@@ -298,12 +306,22 @@ class ChatKServe(BaseChatModel):
                     stream=False,
                     tools=self._tools,
                     extra_kwargs=kwargs or None,
+                    logprobs=self.logprobs,
+                    top_logprobs=self.top_logprobs,
+                    tool_choice=self.tool_choice,
+                    parallel_tool_calls=self.parallel_tool_calls,
                 )
                 response = request_with_retry(
                     client, "POST", "/v1/chat/completions", self.max_retries, json=body
                 )
                 return parse_chat_response(response, self.model_name, "openai")
             else:
+                if self._tools:
+                    raise KServeInferenceError(
+                        "Tool calling is only supported with the OpenAI-compatible protocol. "
+                        "Set protocol='openai' or use a runtime that exposes the OpenAI-compatible "
+                        "API (e.g., vLLM)."
+                    )
                 prompt = messages_to_prompt(messages)
                 body_v2 = build_v2_infer_request(
                     model_name=self.model_name,
@@ -360,12 +378,22 @@ class ChatKServe(BaseChatModel):
                     stream=False,
                     tools=self._tools,
                     extra_kwargs=kwargs or None,
+                    logprobs=self.logprobs,
+                    top_logprobs=self.top_logprobs,
+                    tool_choice=self.tool_choice,
+                    parallel_tool_calls=self.parallel_tool_calls,
                 )
                 response = await async_request_with_retry(
                     client, "POST", "/v1/chat/completions", self.max_retries, json=body
                 )
                 return parse_chat_response(response, self.model_name, "openai")
             else:
+                if self._tools:
+                    raise KServeInferenceError(
+                        "Tool calling is only supported with the OpenAI-compatible protocol. "
+                        "Set protocol='openai' or use a runtime that exposes the OpenAI-compatible "
+                        "API (e.g., vLLM)."
+                    )
                 prompt = messages_to_prompt(messages)
                 body_v2 = build_v2_infer_request(
                     model_name=self.model_name,
@@ -422,6 +450,10 @@ class ChatKServe(BaseChatModel):
                     stream=True,
                     tools=self._tools,
                     extra_kwargs=kwargs or None,
+                    logprobs=self.logprobs,
+                    top_logprobs=self.top_logprobs,
+                    tool_choice=self.tool_choice,
+                    parallel_tool_calls=self.parallel_tool_calls,
                 )
                 for chunk in stream_chat_response(
                     client,
@@ -497,6 +529,10 @@ class ChatKServe(BaseChatModel):
                     stream=True,
                     tools=self._tools,
                     extra_kwargs=kwargs or None,
+                    logprobs=self.logprobs,
+                    top_logprobs=self.top_logprobs,
+                    tool_choice=self.tool_choice,
+                    parallel_tool_calls=self.parallel_tool_calls,
                 )
                 async for chunk in astream_chat_response(
                     client,
@@ -546,6 +582,34 @@ class ChatKServe(BaseChatModel):
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+
+    # ------------------------------------------------------------------
+    # Model introspection
+    # ------------------------------------------------------------------
+
+    async def get_model_info(self) -> KServeModelInfo:
+        """Fetch metadata about the served model.
+
+        Resolves the protocol (if set to ``"auto"``) and queries the appropriate
+        endpoint for model metadata.
+
+        Returns:
+            :class:`~langchain_kserve._common.KServeModelInfo` with model metadata.
+
+        Raises:
+            KServeModelNotFoundError: If the model is not found.
+            KServeInferenceError: On other errors.
+        """
+        async with self._make_async_client() as client:
+            proto = await self._resolve_protocol_async(client)
+            if proto == "openai":
+                return await fetch_model_info_openai(
+                    client, self.model_name, self.max_retries
+                )
+            else:
+                return await fetch_model_info_v2(
+                    client, self.model_name, self.max_retries
+                )
 
 
 # ---------------------------------------------------------------------------

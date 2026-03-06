@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 import httpx
 from langchain_core.exceptions import LangChainException
@@ -337,4 +337,94 @@ def _raise_for_status(response: httpx.Response) -> None:
         )
     raise KServeInferenceError(
         f"KServe returned error ({response.status_code}): {body}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model metadata
+# ---------------------------------------------------------------------------
+
+
+class KServeModelInfo(TypedDict, total=False):
+    """Metadata about a model served by KServe."""
+
+    model_name: str
+    model_version: Optional[str]
+    platform: Optional[str]
+    inputs: Optional[List[Any]]
+    outputs: Optional[List[Any]]
+    raw: Dict[str, Any]
+
+
+async def fetch_model_info_openai(
+    client: httpx.AsyncClient,
+    model_name: str,
+    max_retries: int = 0,
+) -> KServeModelInfo:
+    """Fetch model metadata from the OpenAI-compatible ``GET /v1/models/{model}`` endpoint.
+
+    Args:
+        client: Configured async HTTP client.
+        model_name: The model identifier.
+        max_retries: Number of retry attempts.
+
+    Returns:
+        :class:`KServeModelInfo` populated from the response.
+
+    Raises:
+        KServeModelNotFoundError: If the model is not found.
+        KServeInferenceError: On other errors.
+    """
+    response = await async_request_with_retry(
+        client, "GET", f"/v1/models/{model_name}", max_retries
+    )
+    raw: Dict[str, Any] = {}
+    try:
+        raw = response.json()
+    except Exception:
+        pass
+    return KServeModelInfo(
+        model_name=raw.get("id", model_name),
+        model_version=None,
+        platform=None,
+        inputs=None,
+        outputs=None,
+        raw=raw,
+    )
+
+
+async def fetch_model_info_v2(
+    client: httpx.AsyncClient,
+    model_name: str,
+    max_retries: int = 0,
+) -> KServeModelInfo:
+    """Fetch model metadata from the V2 ``GET /v2/models/{model}`` endpoint.
+
+    Args:
+        client: Configured async HTTP client.
+        model_name: The model identifier.
+        max_retries: Number of retry attempts.
+
+    Returns:
+        :class:`KServeModelInfo` populated from the response.
+
+    Raises:
+        KServeModelNotFoundError: If the model is not found.
+        KServeInferenceError: On other errors.
+    """
+    response = await async_request_with_retry(
+        client, "GET", f"/v2/models/{model_name}", max_retries
+    )
+    raw: Dict[str, Any] = {}
+    try:
+        raw = response.json()
+    except Exception:
+        pass
+    return KServeModelInfo(
+        model_name=raw.get("name", model_name),
+        model_version=raw.get("version"),
+        platform=raw.get("platform"),
+        inputs=raw.get("inputs"),
+        outputs=raw.get("outputs"),
+        raw=raw,
     )

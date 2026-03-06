@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Tuple,
 )
 
 import httpx
@@ -25,9 +26,12 @@ from langchain_core.utils import get_from_env
 from pydantic import ConfigDict, Field, SecretStr, model_validator
 
 from langchain_kserve._common import (
+    KServeModelInfo,
     async_request_with_retry,
     build_async_client,
     build_sync_client,
+    fetch_model_info_openai,
+    fetch_model_info_v2,
     request_with_retry,
 )
 from langchain_kserve._openai_compat import (
@@ -105,6 +109,8 @@ class KServeLLM(BaseLLM):
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
     stop: Optional[List[str]] = Field(default=None)
     streaming: bool = Field(default=False)
+    logprobs: Optional[bool] = Field(default=None)
+    top_logprobs: Optional[int] = Field(default=None)
 
     # ------------------------------------------------------------------
     # Connection behaviour
@@ -227,15 +233,21 @@ class KServeLLM(BaseLLM):
             :class:`~langchain_core.outputs.LLMResult`.
         """
         generations: List[List[Generation]] = []
+        last_usage: Optional[Dict[str, Any]] = None
         with self._make_sync_client() as client:
             proto = self._resolve_protocol_sync(client)
             effective_stop = stop or self.stop
             for prompt in prompts:
-                text = self._call_single(
+                text, usage = self._call_single(
                     client, proto, prompt, effective_stop, **kwargs
                 )
+                if usage is not None:
+                    last_usage = usage
                 generations.append([Generation(text=text)])
-        return LLMResult(generations=generations)
+        llm_output: Optional[Dict[str, Any]] = (
+            {"token_usage": last_usage} if last_usage is not None else None
+        )
+        return LLMResult(generations=generations, llm_output=llm_output)
 
     def _call_single(
         self,
@@ -244,7 +256,7 @@ class KServeLLM(BaseLLM):
         prompt: str,
         stop: Optional[List[str]],
         **kwargs: Any,
-    ) -> str:
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
         if proto == "openai":
             body = build_completion_request(
                 model_name=self.model_name,
@@ -255,6 +267,8 @@ class KServeLLM(BaseLLM):
                 stop=stop,
                 stream=False,
                 extra_kwargs=kwargs or None,
+                logprobs=self.logprobs,
+                top_logprobs=self.top_logprobs,
             )
             response = request_with_retry(
                 client, "POST", "/v1/completions", self.max_retries, json=body
@@ -277,7 +291,7 @@ class KServeLLM(BaseLLM):
                 self.max_retries,
                 json=body_v2,
             )
-            return parse_v2_completion_response(response)
+            return parse_v2_completion_response(response), None
 
     # ------------------------------------------------------------------
     # Streaming — sync
@@ -315,6 +329,8 @@ class KServeLLM(BaseLLM):
                     stop=effective_stop,
                     stream=True,
                     extra_kwargs=kwargs or None,
+                    logprobs=self.logprobs,
+                    top_logprobs=self.top_logprobs,
                 )
                 for text in stream_completion_response(
                     client, "/v1/completions", body, self.model_name
@@ -325,7 +341,7 @@ class KServeLLM(BaseLLM):
                     yield chunk
             else:
                 # V2 doesn't have native streaming; do a single request and yield one chunk
-                text = self._call_single(client, "v2", prompt, effective_stop, **kwargs)
+                text, _usage = self._call_single(client, "v2", prompt, effective_stop, **kwargs)
                 chunk = GenerationChunk(text=text)
                 if run_manager:
                     run_manager.on_llm_new_token(text, chunk=chunk)
@@ -367,6 +383,8 @@ class KServeLLM(BaseLLM):
                     stop=effective_stop,
                     stream=True,
                     extra_kwargs=kwargs or None,
+                    logprobs=self.logprobs,
+                    top_logprobs=self.top_logprobs,
                 )
                 async for text in astream_completion_response(
                     client, "/v1/completions", body, self.model_name
@@ -396,6 +414,34 @@ class KServeLLM(BaseLLM):
                 if run_manager:
                     await run_manager.on_llm_new_token(text, chunk=chunk)
                 yield chunk
+
+    # ------------------------------------------------------------------
+    # Model introspection
+    # ------------------------------------------------------------------
+
+    async def get_model_info(self) -> KServeModelInfo:
+        """Fetch metadata about the served model.
+
+        Resolves the protocol (if set to ``"auto"``) and queries the appropriate
+        endpoint for model metadata.
+
+        Returns:
+            :class:`~langchain_kserve._common.KServeModelInfo` with model metadata.
+
+        Raises:
+            KServeModelNotFoundError: If the model is not found.
+            KServeInferenceError: On other errors.
+        """
+        async with self._make_async_client() as client:
+            proto = await self._resolve_protocol_async(client)
+            if proto == "openai":
+                return await fetch_model_info_openai(
+                    client, self.model_name, self.max_retries
+                )
+            else:
+                return await fetch_model_info_v2(
+                    client, self.model_name, self.max_retries
+                )
 
     # ------------------------------------------------------------------
     # Identifying params

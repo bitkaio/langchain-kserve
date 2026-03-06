@@ -52,6 +52,7 @@ import type {
   ChatKServeCallOptions,
   ChatKServeInput,
   KServeGenerationInfo,
+  KServeModelInfo,
   OpenAITool,
   V2InferResponse,
 } from "./types.js";
@@ -83,6 +84,13 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
   private readonly topP?: number;
   private readonly stop?: string[];
   private readonly streaming: boolean;
+
+  // Logprobs
+  private readonly logprobs?: boolean;
+  private readonly topLogprobs?: number;
+
+  // Tool calling
+  private readonly parallelToolCalls?: boolean;
 
   constructor(fields: ChatKServeInput) {
     super(fields);
@@ -119,6 +127,9 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
     this.topP = fields.topP;
     this.stop = fields.stop;
     this.streaming = fields.streaming ?? false;
+    this.logprobs = fields.logprobs;
+    this.topLogprobs = fields.topLogprobs;
+    this.parallelToolCalls = fields.parallelToolCalls;
 
     this.client = new KServeClient({
       baseUrl: this.baseUrl,
@@ -225,6 +236,12 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
     messages: BaseMessage[],
     options: this["ParsedCallOptions"]
   ): Promise<ChatResult> {
+    const mergedOptions: Partial<ChatKServeCallOptions> = {
+      ...options,
+      logprobs: (options as Partial<ChatKServeCallOptions>).logprobs ?? this.logprobs,
+      topLogprobs: (options as Partial<ChatKServeCallOptions>).topLogprobs ?? this.topLogprobs,
+      parallelToolCalls: (options as Partial<ChatKServeCallOptions>).parallelToolCalls ?? this.parallelToolCalls,
+    };
     const request = buildChatRequest(
       this.modelName,
       messages,
@@ -234,7 +251,7 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
         topP: this.topP,
         stop: this.stop,
       },
-      options as Partial<ChatKServeCallOptions>,
+      mergedOptions,
       false
     );
 
@@ -304,6 +321,12 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
     options: this["ParsedCallOptions"],
     runManager?: CallbackManagerForLLMRun
   ): AsyncGenerator<ChatGenerationChunk> {
+    const mergedOptions: Partial<ChatKServeCallOptions> = {
+      ...options,
+      logprobs: (options as Partial<ChatKServeCallOptions>).logprobs ?? this.logprobs,
+      topLogprobs: (options as Partial<ChatKServeCallOptions>).topLogprobs ?? this.topLogprobs,
+      parallelToolCalls: (options as Partial<ChatKServeCallOptions>).parallelToolCalls ?? this.parallelToolCalls,
+    };
     const request = buildChatRequest(
       this.modelName,
       messages,
@@ -313,7 +336,7 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
         topP: this.topP,
         stop: this.stop,
       },
-      options as Partial<ChatKServeCallOptions>,
+      mergedOptions,
       true
     );
 
@@ -407,5 +430,19 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
       kwargs: { tools: openAITools, ...kwargs },
       config: {},
     }) as Runnable<BaseLanguageModelInput, import("@langchain/core/messages").AIMessageChunk, ChatKServeCallOptions>;
+  }
+
+  // --------------------------------------------------------
+  // Model introspection
+  // --------------------------------------------------------
+
+  /**
+   * Retrieve metadata about the model from the KServe endpoint.
+   *
+   * Tries the OpenAI-compatible /v1/models/{model} endpoint first,
+   * then falls back to the V2 /v2/models/{model} endpoint.
+   */
+  async getModelInfo(): Promise<KServeModelInfo> {
+    return this.client.getModelInfo(this.modelName);
   }
 }

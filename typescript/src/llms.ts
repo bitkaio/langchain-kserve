@@ -41,6 +41,7 @@ import {
 import type {
   KServeLLMCallOptions,
   KServeLLMInput,
+  KServeModelInfo,
   V2InferResponse,
 } from "./types.js";
 import { KServeInferenceError } from "./errors.js";
@@ -146,6 +147,7 @@ export class KServeLLM extends BaseLLM<KServeLLMCallOptions> {
     // For streaming, process prompts one at a time and collect chunks
     if (this.streaming) {
       const allGenerations: LLMResult["generations"] = [];
+      let lastUsage: import("./types.js").OpenAIUsage | undefined = undefined;
 
       for (const prompt of prompts) {
         const chunks: GenerationChunk[] = [];
@@ -157,10 +159,36 @@ export class KServeLLM extends BaseLLM<KServeLLMCallOptions> {
           chunks.push(chunk);
         }
         const text = chunks.map((c) => c.text).join("");
-        allGenerations.push([{ text, generationInfo: chunks[chunks.length - 1]?.generationInfo }]);
+        const lastGenInfo = chunks[chunks.length - 1]?.generationInfo as
+          | (import("./types.js").KServeGenerationInfo & Record<string, unknown>)
+          | undefined;
+        if (lastGenInfo?.tokenUsage) {
+          const tu = lastGenInfo.tokenUsage as {
+            promptTokens: number;
+            completionTokens: number;
+            totalTokens: number;
+          };
+          lastUsage = {
+            prompt_tokens: tu.promptTokens,
+            completion_tokens: tu.completionTokens,
+            total_tokens: tu.totalTokens,
+          };
+        }
+        allGenerations.push([{ text, generationInfo: lastGenInfo }]);
       }
 
-      return { generations: allGenerations };
+      return {
+        generations: allGenerations,
+        llmOutput: lastUsage
+          ? {
+              tokenUsage: {
+                promptTokens: lastUsage.prompt_tokens,
+                completionTokens: lastUsage.completion_tokens,
+                totalTokens: lastUsage.total_tokens,
+              },
+            }
+          : undefined,
+      };
     }
 
     const protocol = await this.resolveProtocol();
@@ -265,12 +293,26 @@ export class KServeLLM extends BaseLLM<KServeLLMCallOptions> {
       request,
       { signal: options.signal }
     )) {
-      const text = parseCompletionStreamChunk(raw);
-      if (text === null) continue;
-      await runManager?.handleLLMNewToken(text);
+      const parsed = parseCompletionStreamChunk(raw);
+      if (parsed === null) continue;
+      const { text, usage } = parsed;
+      const genInfo: import("./types.js").KServeGenerationInfo & Record<string, unknown> = {
+        protocol: "openai",
+        modelName: this.modelName,
+      };
+      if (usage) {
+        genInfo.tokenUsage = {
+          promptTokens: usage.prompt_tokens,
+          completionTokens: usage.completion_tokens,
+          totalTokens: usage.total_tokens,
+        };
+      }
+      if (text) {
+        await runManager?.handleLLMNewToken(text);
+      }
       yield new GenerationChunk({
         text,
-        generationInfo: { protocol: "openai", modelName: this.modelName },
+        generationInfo: genInfo,
       });
     }
   }
@@ -316,5 +358,19 @@ export class KServeLLM extends BaseLLM<KServeLLMCallOptions> {
       }
       throw err;
     }
+  }
+
+  // --------------------------------------------------------
+  // Model introspection
+  // --------------------------------------------------------
+
+  /**
+   * Retrieve metadata about the model from the KServe endpoint.
+   *
+   * Tries the OpenAI-compatible /v1/models/{model} endpoint first,
+   * then falls back to the V2 /v2/models/{model} endpoint.
+   */
+  async getModelInfo(): Promise<KServeModelInfo> {
+    return this.client.getModelInfo(this.modelName);
   }
 }

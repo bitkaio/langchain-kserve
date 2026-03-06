@@ -9,6 +9,7 @@ import {
   parseCompletionResponse,
   parseCompletionStreamChunk,
 } from "../../src/openai-compat.js";
+import type { KServeGenerationInfo } from "../../src/types.js";
 
 describe("buildChatRequest", () => {
   it("builds a basic chat request", () => {
@@ -283,10 +284,172 @@ describe("parseCompletionStreamChunk", () => {
       model: "m",
       choices: [{ index: 0, text: " hello", finish_reason: null }],
     });
-    expect(parseCompletionStreamChunk(raw)).toBe(" hello");
+    const result = parseCompletionStreamChunk(raw);
+    expect(result).not.toBeNull();
+    expect(result?.text).toBe(" hello");
   });
 
   it("returns null for invalid JSON", () => {
     expect(parseCompletionStreamChunk("not json")).toBeNull();
+  });
+
+  it("returns text and usage from final chunk with usage", () => {
+    const raw = JSON.stringify({
+      id: "cmpl-s2",
+      object: "text_completion",
+      created: 0,
+      model: "m",
+      choices: [{ index: 0, text: " end", finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    });
+    const result = parseCompletionStreamChunk(raw);
+    expect(result?.text).toBe(" end");
+    expect(result?.usage?.total_tokens).toBe(15);
+  });
+});
+
+// ============================================================
+// New feature tests
+// ============================================================
+
+describe("parseChatResponse — token usage in llm_output", () => {
+  it("populates generationInfo with token usage", () => {
+    const response = {
+      id: "chatcmpl-usage",
+      object: "chat.completion",
+      created: 0,
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "Hi" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    };
+    const gen = parseChatResponse(response, "m");
+    const info = gen.generationInfo as KServeGenerationInfo;
+    expect(info.tokenUsage).toBeDefined();
+    expect(info.tokenUsage?.promptTokens).toBe(10);
+    expect(info.tokenUsage?.completionTokens).toBe(5);
+    expect(info.tokenUsage?.totalTokens).toBe(15);
+  });
+});
+
+describe("buildChatRequest — logprobs", () => {
+  it("includes logprobs and top_logprobs in request body when set", () => {
+    const messages = [new HumanMessage("test")];
+    const req = buildChatRequest(
+      "model",
+      messages,
+      {},
+      { logprobs: true, topLogprobs: 5 },
+      false
+    );
+    expect(req.logprobs).toBe(true);
+    expect(req.top_logprobs).toBe(5);
+  });
+});
+
+describe("parseChatResponse — logprobs in generationInfo", () => {
+  it("includes logprobs from choice in generationInfo", () => {
+    const logprobsData = {
+      content: [
+        {
+          token: "Hi",
+          logprob: -0.5,
+          top_logprobs: [{ token: "Hi", logprob: -0.5 }],
+        },
+      ],
+    };
+    const response = {
+      id: "chatcmpl-logprobs",
+      object: "chat.completion",
+      created: 0,
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "Hi" },
+          finish_reason: "stop",
+          logprobs: logprobsData,
+        },
+      ],
+    };
+    const gen = parseChatResponse(response, "m");
+    const info = gen.generationInfo as KServeGenerationInfo;
+    expect(info.logprobs).toBeDefined();
+    expect(info.logprobs?.content).toHaveLength(1);
+    expect(info.logprobs?.content?.[0].token).toBe("Hi");
+  });
+});
+
+describe("parseChatResponse — invalid JSON tool args", () => {
+  it("puts invalid JSON tool args in invalid_tool_calls", () => {
+    const response = {
+      id: "chatcmpl-bad-tool",
+      object: "chat.completion",
+      created: 0,
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_bad",
+                type: "function",
+                function: { name: "bad_tool", arguments: "not json" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+    };
+    const gen = parseChatResponse(response, "m");
+    const aiMsg = gen.message as import("@langchain/core/messages").AIMessage;
+    expect(aiMsg.tool_calls).toHaveLength(0);
+    expect(aiMsg.invalid_tool_calls).toHaveLength(1);
+    expect(aiMsg.invalid_tool_calls[0].name).toBe("bad_tool");
+    expect(aiMsg.invalid_tool_calls[0].args).toBe("not json");
+    expect(aiMsg.invalid_tool_calls[0].error).toBeTruthy();
+  });
+});
+
+describe("buildChatRequest — parallel_tool_calls", () => {
+  it("includes parallel_tool_calls in request body when tools are present", () => {
+    const messages = [new HumanMessage("test")];
+    const tools = [
+      {
+        type: "function" as const,
+        function: { name: "search", parameters: {} },
+      },
+    ];
+    const req = buildChatRequest(
+      "model",
+      messages,
+      {},
+      { tools, parallelToolCalls: true },
+      false
+    );
+    expect(req.parallel_tool_calls).toBe(true);
+  });
+
+  it("does not include parallel_tool_calls when no tools", () => {
+    const messages = [new HumanMessage("test")];
+    const req = buildChatRequest(
+      "model",
+      messages,
+      {},
+      { parallelToolCalls: true },
+      false
+    );
+    expect(req.parallel_tool_calls).toBeUndefined();
   });
 });
