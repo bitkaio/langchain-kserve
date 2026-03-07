@@ -35,11 +35,8 @@ import { RunnableBinding, RunnableLambda } from "@langchain/core/runnables";
 import type { Runnable } from "@langchain/core/runnables";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
-// zod and zod-to-json-schema are listed as dependencies in package.json.
-// The type-only import is erased at runtime (TypeScript removes it) and does not
-// cause a hard failure at module load time. The actual zodToJsonSchema call is
-// resolved lazily at withStructuredOutput() call time via a dynamic import helper.
 import type { ZodType } from "zod";
+import zodToJsonSchema from "zod-to-json-schema";
 
 import { KServeClient } from "./client.js";
 import {
@@ -491,19 +488,21 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
    * @param config - Strategy options
    */
   withStructuredOutput<T = Record<string, unknown>>(
-    schema: ZodType<T> | Record<string, unknown>,
+    schema: unknown,
     config?: {
-      method?: "functionCalling" | "jsonSchema" | "jsonMode";
+      method?: string;
       includeRaw?: boolean;
       strict?: boolean;
       name?: string;
     }
   ): Runnable<BaseLanguageModelInput, T> {
     // Determine if schema is a Zod schema by checking for _def (Zod v3) or _zod (Zod v4)
+    const schemaAsObj = schema as Record<string, unknown>;
     const isZodSchema =
-      typeof (schema as Record<string, unknown>)._def !== "undefined" &&
-      typeof (schema as Record<string, unknown>)._def === "object" &&
-      (schema as Record<string, unknown>)._def !== null;
+      schema !== null &&
+      typeof schema === "object" &&
+      typeof schemaAsObj._def !== "undefined" &&
+      schemaAsObj._def !== null;
 
     // Derive schema name
     let schemaName: string;
@@ -512,10 +511,9 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
     } else if (isZodSchema) {
       // Zod v4 stores description via globalRegistry (accessible as schema.description)
       // Zod v3 stores it in schema._def.description
-      const zodSchemaAny = schema as Record<string, unknown>;
       const desc =
-        (zodSchemaAny.description as string | undefined) ??
-        ((zodSchemaAny._def as Record<string, unknown> | undefined)
+        (schemaAsObj.description as string | undefined) ??
+        ((schemaAsObj._def as Record<string, unknown> | undefined)
           ?.description as string | undefined);
       schemaName = desc ?? "output_schema";
     } else {
@@ -523,23 +521,12 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
     }
 
     // Convert to JSON Schema.
-    // For Zod v4 schemas (the installed version), we use the native schema.toJSONSchema()
-    // method which requires no external package.
-    // For plain object schemas, we use the object directly as the JSON Schema.
+    // Uses zod-to-json-schema for Zod schemas; plain objects are used as-is.
     let jsonSchema: Record<string, unknown>;
     if (isZodSchema) {
-      // Treat the schema as an unknown object to access toJSONSchema() without
-      // TypeScript complaining about the return type mismatch.
-      const zodSchemaObj = schema as Record<string, unknown>;
-      const toJSONSchemaFn = zodSchemaObj.toJSONSchema;
-      if (typeof toJSONSchemaFn !== "function") {
-        throw new Error(
-          "withStructuredOutput() requires Zod v4 (which provides schema.toJSONSchema()) " +
-            "or zod-to-json-schema installed for Zod v3 schemas."
-        );
-      }
-      // Zod v4 native JSON Schema conversion
-      jsonSchema = (toJSONSchemaFn as () => Record<string, unknown>).call(schema);
+      jsonSchema = zodToJsonSchema(schema as ZodType<unknown>) as Record<string, unknown>;
+      // Strip $schema meta field — not needed in inference request payloads
+      delete jsonSchema["$schema"];
     } else {
       jsonSchema = schema as Record<string, unknown>;
     }
@@ -557,7 +544,7 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
         },
       };
 
-      const modelWithTool = this.bindTools([tool], {
+      const modelWithTool = this.bindTools([tool as unknown as Record<string, unknown>], {
         toolChoice: { type: "function", function: { name: schemaName } },
       });
 
@@ -628,8 +615,11 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
         },
       };
 
-      // Create a new model instance with responseFormat set
-      const modelWithFormat = this.bind({ responseFormat } as Partial<ChatKServeCallOptions>);
+      const capturedThis = this;
+      const modelWithFormat = new RunnableLambda({
+        func: (input: BaseLanguageModelInput) =>
+          capturedThis.invoke(input, { responseFormat } as Partial<ChatKServeCallOptions>),
+      });
 
       if (config?.includeRaw) {
         const rawParser = new RunnableLambda({
@@ -655,13 +645,17 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
         return modelWithFormat.pipe(rawParser) as unknown as Runnable<BaseLanguageModelInput, T>;
       }
 
-      const jsonParser = new JsonOutputParser<T>();
+      const jsonParser = new JsonOutputParser<Record<string, unknown>>();
       return modelWithFormat.pipe(jsonParser) as unknown as Runnable<BaseLanguageModelInput, T>;
     }
 
     // jsonMode
     const responseFormat: OpenAIResponseFormat = { type: "json_object" };
-    const modelWithFormat = this.bind({ responseFormat } as Partial<ChatKServeCallOptions>);
+    const capturedThis = this;
+    const modelWithFormat = new RunnableLambda({
+      func: (input: BaseLanguageModelInput) =>
+        capturedThis.invoke(input, { responseFormat } as Partial<ChatKServeCallOptions>),
+    });
 
     if (config?.includeRaw) {
       const rawParser = new RunnableLambda({
@@ -687,7 +681,7 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
       return modelWithFormat.pipe(rawParser) as unknown as Runnable<BaseLanguageModelInput, T>;
     }
 
-    const jsonParser = new JsonOutputParser<T>();
+    const jsonParser = new JsonOutputParser<Record<string, unknown>>();
     return modelWithFormat.pipe(jsonParser) as unknown as Runnable<BaseLanguageModelInput, T>;
   }
 

@@ -27,7 +27,6 @@ import type {
   OpenAICompletionResponse,
   OpenAICompletionStreamChunk,
   OpenAITool,
-  OpenAIToolCall,
   OpenAIUsage,
 } from "./types.js";
 import { convertMessagesToOpenAI } from "./utils.js";

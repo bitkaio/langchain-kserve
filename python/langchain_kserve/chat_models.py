@@ -697,6 +697,7 @@ class ChatKServe(BaseChatModel):
             json_schema: Dict[str, Any] = pydantic_cls.model_json_schema()
         else:
             # schema is a dict
+            pydantic_cls = None  # always define so closure cells are never empty
             schema_dict: Dict[str, Any] = schema  # type: ignore[assignment]
             name = schema_dict.get("title", "output_schema")
             json_schema = schema_dict

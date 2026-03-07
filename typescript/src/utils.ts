@@ -74,7 +74,7 @@ export function messageContentToOpenAI(
         return { type: "text", text: block };
       }
       if (block.type === "text") {
-        return { type: "text", text: block.text };
+        return { type: "text", text: block.text as string };
       }
       if (block.type === "image_url") {
         const imgBlock = block as {
