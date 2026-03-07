@@ -29,7 +29,9 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "zod": "^3.22.0",
+    "zod-to-json-schema": "^3.22.0"
   },
   "devDependencies": {
     "@langchain/core": ">=0.3.0",

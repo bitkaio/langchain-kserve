@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import (
     Any,
@@ -23,14 +24,17 @@ from langchain_core.callbacks import (
     CallbackManagerForLLMRun,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.tools import BaseTool
 from langchain_core.utils import get_from_env
-from pydantic import ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from langchain_kserve._common import (
     KServeConnectionError,
+    KServeError,
     KServeInferenceError,
     KServeModelInfo,
     async_request_with_retry,
@@ -138,6 +142,14 @@ class ChatKServe(BaseChatModel):
     top_logprobs: Optional[int] = Field(default=None)
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(default=None)
     parallel_tool_calls: Optional[bool] = Field(default=None)
+    response_format: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "OpenAI response format constraint. E.g. ``{'type': 'json_object'}`` or "
+            "``{'type': 'json_schema', 'json_schema': {'name': '...', 'schema': {...}}}``."
+            " Only supported with the OpenAI-compatible protocol."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Connection behaviour
@@ -180,6 +192,36 @@ class ChatKServe(BaseChatModel):
         if not values.get("ca_bundle"):
             values["ca_bundle"] = get_from_env("ca_bundle", "KSERVE_CA_BUNDLE", default="") or None
         return values
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _validate_response_format(
+        cls, v: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Validate that json_schema response_format has a proper schema dict.
+
+        Args:
+            v: The response_format value to validate.
+
+        Returns:
+            The validated response_format dict, or ``None``.
+
+        Raises:
+            ValueError: If ``type == "json_schema"`` but the nested ``schema``
+                field is missing or not a dict.
+        """
+        if v is None:
+            return v
+        if v.get("type") == "json_schema":
+            json_schema_block = v.get("json_schema", {})
+            schema = json_schema_block.get("schema")
+            if not isinstance(schema, dict):
+                raise ValueError(
+                    "response_format with type='json_schema' must include a "
+                    "'json_schema.schema' dict. Got: "
+                    f"{type(schema).__name__!r}"
+                )
+        return v
 
     # ------------------------------------------------------------------
     # LangChain required properties
@@ -252,6 +294,8 @@ class ChatKServe(BaseChatModel):
     def bind_tools(
         self,
         tools: Sequence[Union[Dict[str, Any], Type[Any], BaseTool]],
+        *,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> "ChatKServe":
         """Return a copy of this model with tools bound for OpenAI function calling.
@@ -259,13 +303,18 @@ class ChatKServe(BaseChatModel):
         Args:
             tools: Tools to bind. Each tool can be a :class:`~langchain_core.tools.BaseTool`,
                 a Pydantic model, or an OpenAI-schema dict.
-            **kwargs: Extra kwargs merged into the request body on each call.
+            tool_choice: Override the ``tool_choice`` field on the clone. If ``None``,
+                the field value on ``self`` is preserved.
+            **kwargs: Extra kwargs (reserved for future use).
 
         Returns:
             A new :class:`ChatKServe` instance with ``_tools`` set.
         """
         formatted_tools = [_format_tool(t) for t in tools]
-        clone = self.model_copy(deep=True)
+        update: Dict[str, Any] = {}
+        if tool_choice is not None:
+            update["tool_choice"] = tool_choice
+        clone = self.model_copy(update=update, deep=True)
         object.__setattr__(clone, "_tools", formatted_tools)
         return clone
 
@@ -295,6 +344,12 @@ class ChatKServe(BaseChatModel):
             proto = self._resolve_protocol_sync(client)
             effective_stop = stop or self.stop
 
+            if self.response_format is not None and proto == "v2":
+                raise KServeError(
+                    "Response format constraints are only supported with the "
+                    "OpenAI-compatible protocol. Set protocol='openai'."
+                )
+
             if proto == "openai":
                 body = build_chat_request(
                     model_name=self.model_name,
@@ -310,6 +365,7 @@ class ChatKServe(BaseChatModel):
                     top_logprobs=self.top_logprobs,
                     tool_choice=self.tool_choice,
                     parallel_tool_calls=self.parallel_tool_calls,
+                    response_format=self.response_format,
                 )
                 response = request_with_retry(
                     client, "POST", "/v1/chat/completions", self.max_retries, json=body
@@ -367,6 +423,12 @@ class ChatKServe(BaseChatModel):
             proto = await self._resolve_protocol_async(client)
             effective_stop = stop or self.stop
 
+            if self.response_format is not None and proto == "v2":
+                raise KServeError(
+                    "Response format constraints are only supported with the "
+                    "OpenAI-compatible protocol. Set protocol='openai'."
+                )
+
             if proto == "openai":
                 body = build_chat_request(
                     model_name=self.model_name,
@@ -382,6 +444,7 @@ class ChatKServe(BaseChatModel):
                     top_logprobs=self.top_logprobs,
                     tool_choice=self.tool_choice,
                     parallel_tool_calls=self.parallel_tool_calls,
+                    response_format=self.response_format,
                 )
                 response = await async_request_with_retry(
                     client, "POST", "/v1/chat/completions", self.max_retries, json=body
@@ -439,6 +502,12 @@ class ChatKServe(BaseChatModel):
             proto = self._resolve_protocol_sync(client)
             effective_stop = stop or self.stop
 
+            if self.response_format is not None and proto == "v2":
+                raise KServeError(
+                    "Response format constraints are only supported with the "
+                    "OpenAI-compatible protocol. Set protocol='openai'."
+                )
+
             if proto == "openai":
                 body = build_chat_request(
                     model_name=self.model_name,
@@ -454,6 +523,7 @@ class ChatKServe(BaseChatModel):
                     top_logprobs=self.top_logprobs,
                     tool_choice=self.tool_choice,
                     parallel_tool_calls=self.parallel_tool_calls,
+                    response_format=self.response_format,
                 )
                 for chunk in stream_chat_response(
                     client,
@@ -518,6 +588,12 @@ class ChatKServe(BaseChatModel):
             proto = await self._resolve_protocol_async(client)
             effective_stop = stop or self.stop
 
+            if self.response_format is not None and proto == "v2":
+                raise KServeError(
+                    "Response format constraints are only supported with the "
+                    "OpenAI-compatible protocol. Set protocol='openai'."
+                )
+
             if proto == "openai":
                 body = build_chat_request(
                     model_name=self.model_name,
@@ -533,6 +609,7 @@ class ChatKServe(BaseChatModel):
                     top_logprobs=self.top_logprobs,
                     tool_choice=self.tool_choice,
                     parallel_tool_calls=self.parallel_tool_calls,
+                    response_format=self.response_format,
                 )
                 async for chunk in astream_chat_response(
                     client,
@@ -568,6 +645,161 @@ class ChatKServe(BaseChatModel):
                             str(chunk.message.content), chunk=chunk
                         )
                     yield chunk
+
+    # ------------------------------------------------------------------
+    # Structured output
+    # ------------------------------------------------------------------
+
+    def with_structured_output(
+        self,
+        schema: Union[Type[Any], Dict[str, Any]],
+        *,
+        method: Literal["function_calling", "json_schema", "json_mode"] = "function_calling",
+        include_raw: bool = False,
+        strict: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Runnable:
+        """Return a chain that produces structured output conforming to ``schema``.
+
+        Args:
+            schema: A Pydantic model class or a JSON-schema dict describing the
+                desired output shape.
+            method: Strategy to use for structured output.
+
+                - ``"function_calling"`` (default): forces the model to call a
+                  single tool whose schema mirrors ``schema``. Parses
+                  ``tool_calls[0].args`` from the response.
+                - ``"json_schema"``: sets ``response_format`` to
+                  ``{"type": "json_schema", ...}`` and parses JSON from the
+                  message content.
+                - ``"json_mode"``: sets ``response_format`` to
+                  ``{"type": "json_object"}`` and uses a ``JsonOutputParser``.
+            include_raw: When ``True`` the chain output is a dict with keys
+                ``"raw"`` (the original :class:`~langchain_core.messages.AIMessage`),
+                ``"parsed"`` (the parsed result or ``None`` on error), and
+                ``"parsing_error"`` (the exception or ``None``).
+            strict: Whether to enforce strict JSON schema validation (only used
+                for the ``"json_schema"`` method).
+            **kwargs: Additional kwargs (reserved for future use).
+
+        Returns:
+            A :class:`~langchain_core.runnables.Runnable` whose output type
+            depends on ``schema`` and ``include_raw``.
+        """
+        # ------------------------------------------------------------------
+        # Derive a name and a JSON schema from the provided schema argument
+        # ------------------------------------------------------------------
+        is_pydantic = isinstance(schema, type) and issubclass(schema, BaseModel)
+
+        if is_pydantic:
+            pydantic_cls = schema  # type: ignore[assignment]
+            name: str = pydantic_cls.__name__
+            json_schema: Dict[str, Any] = pydantic_cls.model_json_schema()
+        else:
+            # schema is a dict
+            schema_dict: Dict[str, Any] = schema  # type: ignore[assignment]
+            name = schema_dict.get("title", "output_schema")
+            json_schema = schema_dict
+
+        # ------------------------------------------------------------------
+        # Build the appropriate LLM chain variant
+        # ------------------------------------------------------------------
+
+        if method == "function_calling":
+            tool_dict: Dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": json_schema.get("description", ""),
+                    "parameters": json_schema,
+                },
+            }
+            forced_choice: Dict[str, Any] = {
+                "type": "function",
+                "function": {"name": name},
+            }
+            llm_with_tool = self.bind_tools([tool_dict], tool_choice=forced_choice)
+
+            def _parse_tool_call(ai_message: AIMessage) -> Any:
+                if not ai_message.tool_calls:
+                    raise ValueError(
+                        f"Expected tool call for '{name}' but got none. "
+                        f"Message content: {ai_message.content!r}"
+                    )
+                args = ai_message.tool_calls[0]["args"]
+                if isinstance(args, str):
+                    args = json.loads(args)
+                if is_pydantic:
+                    return pydantic_cls.model_validate(args)  # type: ignore[union-attr]
+                return args
+
+            output_parser: Runnable = RunnableLambda(_parse_tool_call)
+            chain: Runnable = llm_with_tool | output_parser  # type: ignore[operator]
+
+        elif method == "json_schema":
+            rf: Dict[str, Any] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": name,
+                    "strict": strict if strict is not None else True,
+                    "schema": json_schema,
+                },
+            }
+            llm_with_rf = self.bind(response_format=rf)
+
+            def _parse_json_schema(ai_message: AIMessage) -> Any:
+                content = ai_message.content
+                if isinstance(content, list):
+                    # multimodal — extract text
+                    content = "".join(
+                        b if isinstance(b, str) else b.get("text", "")
+                        for b in content  # type: ignore[union-attr]
+                        if isinstance(b, (str, dict))
+                    )
+                parsed = json.loads(str(content))
+                if is_pydantic:
+                    return pydantic_cls.model_validate(parsed)  # type: ignore[union-attr]
+                return parsed
+
+            output_parser = RunnableLambda(_parse_json_schema)
+            chain = llm_with_rf | output_parser  # type: ignore[operator]
+
+        elif method == "json_mode":
+            llm_with_rf = self.bind(response_format={"type": "json_object"})
+            output_parser = JsonOutputParser()
+            chain = llm_with_rf | output_parser  # type: ignore[operator]
+
+        else:
+            raise ValueError(
+                f"Unsupported method: {method!r}. "
+                "Choose from 'function_calling', 'json_schema', 'json_mode'."
+            )
+
+        # ------------------------------------------------------------------
+        # Optionally wrap with include_raw passthrough
+        # ------------------------------------------------------------------
+        if not include_raw:
+            return chain
+
+        def _make_raw_wrapper(
+            llm: Runnable, parser: Runnable
+        ) -> Runnable:
+            def _run_with_raw(messages: Any) -> Dict[str, Any]:
+                raw = llm.invoke(messages)
+                try:
+                    parsed: Any = parser.invoke(raw)
+                    parsing_error: Optional[Exception] = None
+                except Exception as exc:
+                    parsed = None
+                    parsing_error = exc
+                return {"raw": raw, "parsed": parsed, "parsing_error": parsing_error}
+
+            return RunnableLambda(_run_with_raw)
+
+        if method == "function_calling":
+            return _make_raw_wrapper(llm_with_tool, output_parser)
+        else:
+            return _make_raw_wrapper(llm_with_rf, output_parser)
 
     # ------------------------------------------------------------------
     # Identifying params

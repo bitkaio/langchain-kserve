@@ -145,6 +145,7 @@ def build_chat_request(
     top_logprobs: Optional[int] = None,
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
     parallel_tool_calls: Optional[bool] = None,
+    response_format: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a ``/v1/chat/completions`` request body.
 
@@ -162,6 +163,8 @@ def build_chat_request(
         top_logprobs: Number of top log probabilities to return per token.
         tool_choice: Tool choice strategy (e.g. ``"auto"``, ``"required"``).
         parallel_tool_calls: Whether to allow parallel tool calls.
+        response_format: OpenAI response format dict (e.g. ``{"type": "json_object"}``
+            or ``{"type": "json_schema", "json_schema": {...}}``).
 
     Returns:
         JSON-serialisable request body dict.
@@ -189,6 +192,8 @@ def build_chat_request(
         body["tool_choice"] = tool_choice
     if parallel_tool_calls is not None:
         body["parallel_tool_calls"] = parallel_tool_calls
+    if response_format is not None:
+        body["response_format"] = response_format
     if extra_kwargs:
         body.update(extra_kwargs)
     return body

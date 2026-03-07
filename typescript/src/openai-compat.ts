@@ -94,6 +94,11 @@ export function buildChatRequest(
     request.top_logprobs = options.topLogprobs;
   }
 
+  // Response format (JSON mode / structured output)
+  if (options?.responseFormat !== undefined) {
+    request.response_format = options.responseFormat;
+  }
+
   // Request usage in streaming chunks (vLLM supports this)
   if (stream) {
     request.stream_options = { include_usage: true };

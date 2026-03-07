@@ -31,9 +31,15 @@ import type { BaseLanguageModelInput } from "@langchain/core/language_models/bas
 import type { BaseMessage } from "@langchain/core/messages";
 import type { ChatGeneration, ChatResult } from "@langchain/core/outputs";
 import { ChatGenerationChunk } from "@langchain/core/outputs";
-import { RunnableBinding } from "@langchain/core/runnables";
+import { RunnableBinding, RunnableLambda } from "@langchain/core/runnables";
 import type { Runnable } from "@langchain/core/runnables";
 import type { StructuredToolInterface } from "@langchain/core/tools";
+import { JsonOutputParser } from "@langchain/core/output_parsers";
+// zod and zod-to-json-schema are listed as dependencies in package.json.
+// The type-only import is erased at runtime (TypeScript removes it) and does not
+// cause a hard failure at module load time. The actual zodToJsonSchema call is
+// resolved lazily at withStructuredOutput() call time via a dynamic import helper.
+import type { ZodType } from "zod";
 
 import { KServeClient } from "./client.js";
 import {
@@ -53,6 +59,7 @@ import type {
   ChatKServeInput,
   KServeGenerationInfo,
   KServeModelInfo,
+  OpenAIResponseFormat,
   OpenAITool,
   V2InferResponse,
 } from "./types.js";
@@ -92,6 +99,9 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
   // Tool calling
   private readonly parallelToolCalls?: boolean;
 
+  // Response format (OpenAI-compatible only)
+  private readonly responseFormat?: OpenAIResponseFormat;
+
   constructor(fields: ChatKServeInput) {
     super(fields);
 
@@ -130,6 +140,19 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
     this.logprobs = fields.logprobs;
     this.topLogprobs = fields.topLogprobs;
     this.parallelToolCalls = fields.parallelToolCalls;
+
+    // Validate and store responseFormat
+    if (fields.responseFormat !== undefined) {
+      if (fields.responseFormat.type === "json_schema") {
+        const schemaVal = fields.responseFormat.json_schema?.schema;
+        if (schemaVal === undefined || typeof schemaVal !== "object" || schemaVal === null) {
+          throw new Error(
+            'responseFormat.type "json_schema" requires responseFormat.json_schema.schema to be an object.'
+          );
+        }
+      }
+      this.responseFormat = fields.responseFormat;
+    }
 
     this.client = new KServeClient({
       baseUrl: this.baseUrl,
@@ -226,6 +249,15 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
 
     const protocol = await this.resolveProtocol(options.signal);
 
+    const effectiveResponseFormat =
+      (options as Partial<ChatKServeCallOptions>).responseFormat ?? this.responseFormat;
+
+    if (protocol === "v2" && effectiveResponseFormat !== undefined) {
+      throw new KServeInferenceError(
+        "Response format constraints are only supported with the OpenAI-compatible protocol. Set protocol: 'openai'."
+      );
+    }
+
     if (protocol === "openai") {
       return this._generateOpenAI(messages, options);
     }
@@ -241,6 +273,7 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
       logprobs: (options as Partial<ChatKServeCallOptions>).logprobs ?? this.logprobs,
       topLogprobs: (options as Partial<ChatKServeCallOptions>).topLogprobs ?? this.topLogprobs,
       parallelToolCalls: (options as Partial<ChatKServeCallOptions>).parallelToolCalls ?? this.parallelToolCalls,
+      responseFormat: (options as Partial<ChatKServeCallOptions>).responseFormat ?? this.responseFormat,
     };
     const request = buildChatRequest(
       this.modelName,
@@ -309,6 +342,15 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
   ): AsyncGenerator<ChatGenerationChunk> {
     const protocol = await this.resolveProtocol(options.signal);
 
+    const effectiveResponseFormat =
+      (options as Partial<ChatKServeCallOptions>).responseFormat ?? this.responseFormat;
+
+    if (protocol === "v2" && effectiveResponseFormat !== undefined) {
+      throw new KServeInferenceError(
+        "Response format constraints are only supported with the OpenAI-compatible protocol. Set protocol: 'openai'."
+      );
+    }
+
     if (protocol === "openai") {
       yield* this._streamOpenAI(messages, options, runManager);
     } else {
@@ -326,6 +368,7 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
       logprobs: (options as Partial<ChatKServeCallOptions>).logprobs ?? this.logprobs,
       topLogprobs: (options as Partial<ChatKServeCallOptions>).topLogprobs ?? this.topLogprobs,
       parallelToolCalls: (options as Partial<ChatKServeCallOptions>).parallelToolCalls ?? this.parallelToolCalls,
+      responseFormat: (options as Partial<ChatKServeCallOptions>).responseFormat ?? this.responseFormat,
     };
     const request = buildChatRequest(
       this.modelName,
@@ -430,6 +473,222 @@ export class ChatKServe extends BaseChatModel<ChatKServeCallOptions> {
       kwargs: { tools: openAITools, ...kwargs },
       config: {},
     }) as Runnable<BaseLanguageModelInput, import("@langchain/core/messages").AIMessageChunk, ChatKServeCallOptions>;
+  }
+
+  // --------------------------------------------------------
+  // Structured output
+  // --------------------------------------------------------
+
+  /**
+   * Return a runnable that produces structured output of type T.
+   *
+   * Three strategies are supported:
+   * - "functionCalling" (default): binds a tool and extracts tool call args
+   * - "jsonSchema": sets response_format to json_schema and parses content
+   * - "jsonMode": sets response_format to json_object and parses content
+   *
+   * @param schema - Zod schema or plain JSON Schema object describing the output
+   * @param config - Strategy options
+   */
+  withStructuredOutput<T = Record<string, unknown>>(
+    schema: ZodType<T> | Record<string, unknown>,
+    config?: {
+      method?: "functionCalling" | "jsonSchema" | "jsonMode";
+      includeRaw?: boolean;
+      strict?: boolean;
+      name?: string;
+    }
+  ): Runnable<BaseLanguageModelInput, T> {
+    // Determine if schema is a Zod schema by checking for _def (Zod v3) or _zod (Zod v4)
+    const isZodSchema =
+      typeof (schema as Record<string, unknown>)._def !== "undefined" &&
+      typeof (schema as Record<string, unknown>)._def === "object" &&
+      (schema as Record<string, unknown>)._def !== null;
+
+    // Derive schema name
+    let schemaName: string;
+    if (config?.name) {
+      schemaName = config.name;
+    } else if (isZodSchema) {
+      // Zod v4 stores description via globalRegistry (accessible as schema.description)
+      // Zod v3 stores it in schema._def.description
+      const zodSchemaAny = schema as Record<string, unknown>;
+      const desc =
+        (zodSchemaAny.description as string | undefined) ??
+        ((zodSchemaAny._def as Record<string, unknown> | undefined)
+          ?.description as string | undefined);
+      schemaName = desc ?? "output_schema";
+    } else {
+      schemaName = "output_schema";
+    }
+
+    // Convert to JSON Schema.
+    // For Zod v4 schemas (the installed version), we use the native schema.toJSONSchema()
+    // method which requires no external package.
+    // For plain object schemas, we use the object directly as the JSON Schema.
+    let jsonSchema: Record<string, unknown>;
+    if (isZodSchema) {
+      // Treat the schema as an unknown object to access toJSONSchema() without
+      // TypeScript complaining about the return type mismatch.
+      const zodSchemaObj = schema as Record<string, unknown>;
+      const toJSONSchemaFn = zodSchemaObj.toJSONSchema;
+      if (typeof toJSONSchemaFn !== "function") {
+        throw new Error(
+          "withStructuredOutput() requires Zod v4 (which provides schema.toJSONSchema()) " +
+            "or zod-to-json-schema installed for Zod v3 schemas."
+        );
+      }
+      // Zod v4 native JSON Schema conversion
+      jsonSchema = (toJSONSchemaFn as () => Record<string, unknown>).call(schema);
+    } else {
+      jsonSchema = schema as Record<string, unknown>;
+    }
+
+    const method = config?.method ?? "functionCalling";
+
+    if (method === "functionCalling") {
+      // Build OpenAI tool
+      const tool: OpenAITool = {
+        type: "function",
+        function: {
+          name: schemaName,
+          description: schemaName,
+          parameters: jsonSchema,
+        },
+      };
+
+      const modelWithTool = this.bindTools([tool], {
+        toolChoice: { type: "function", function: { name: schemaName } },
+      });
+
+      if (config?.includeRaw) {
+        const rawParser = new RunnableLambda({
+          func: (message: import("@langchain/core/messages").AIMessageChunk): {
+            raw: import("@langchain/core/messages").AIMessageChunk;
+            parsed: T | null;
+            parsingError: Error | null;
+          } => {
+            try {
+              const aiMsg = message as import("@langchain/core/messages").AIMessage;
+              const toolCalls = aiMsg.tool_calls;
+              let parsed: T;
+              if (toolCalls && toolCalls.length > 0) {
+                const args = toolCalls[0]!.args;
+                if (typeof args === "string") {
+                  parsed = JSON.parse(args) as T;
+                } else {
+                  parsed = args as unknown as T;
+                }
+              } else {
+                const content = typeof aiMsg.content === "string" ? aiMsg.content : "";
+                parsed = JSON.parse(content) as T;
+              }
+              return { raw: message, parsed, parsingError: null };
+            } catch (e) {
+              return {
+                raw: message,
+                parsed: null,
+                parsingError: e instanceof Error ? e : new Error(String(e)),
+              };
+            }
+          },
+        });
+
+        return modelWithTool.pipe(rawParser) as unknown as Runnable<BaseLanguageModelInput, T>;
+      }
+
+      // Output parser: extract tool call args from AIMessage
+      const outputParser = new RunnableLambda({
+        func: (message: import("@langchain/core/messages").AIMessageChunk): T => {
+          const aiMsg = message as import("@langchain/core/messages").AIMessage;
+          const toolCalls = aiMsg.tool_calls;
+          if (toolCalls && toolCalls.length > 0) {
+            const args = toolCalls[0]!.args;
+            if (typeof args === "string") {
+              return JSON.parse(args) as T;
+            }
+            return args as unknown as T;
+          }
+          // Fallback: try to parse content as JSON
+          const content = typeof aiMsg.content === "string" ? aiMsg.content : "";
+          return JSON.parse(content) as T;
+        },
+      });
+
+      return modelWithTool.pipe(outputParser) as unknown as Runnable<BaseLanguageModelInput, T>;
+    }
+
+    if (method === "jsonSchema") {
+      const responseFormat: OpenAIResponseFormat = {
+        type: "json_schema",
+        json_schema: {
+          name: schemaName,
+          strict: config?.strict ?? true,
+          schema: jsonSchema,
+        },
+      };
+
+      // Create a new model instance with responseFormat set
+      const modelWithFormat = this.bind({ responseFormat } as Partial<ChatKServeCallOptions>);
+
+      if (config?.includeRaw) {
+        const rawParser = new RunnableLambda({
+          func: (message: import("@langchain/core/messages").AIMessageChunk): {
+            raw: import("@langchain/core/messages").AIMessageChunk;
+            parsed: T | null;
+            parsingError: Error | null;
+          } => {
+            try {
+              const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+              const parsed = JSON.parse(content) as T;
+              return { raw: message, parsed, parsingError: null };
+            } catch (e) {
+              return {
+                raw: message,
+                parsed: null,
+                parsingError: e instanceof Error ? e : new Error(String(e)),
+              };
+            }
+          },
+        });
+
+        return modelWithFormat.pipe(rawParser) as unknown as Runnable<BaseLanguageModelInput, T>;
+      }
+
+      const jsonParser = new JsonOutputParser<T>();
+      return modelWithFormat.pipe(jsonParser) as unknown as Runnable<BaseLanguageModelInput, T>;
+    }
+
+    // jsonMode
+    const responseFormat: OpenAIResponseFormat = { type: "json_object" };
+    const modelWithFormat = this.bind({ responseFormat } as Partial<ChatKServeCallOptions>);
+
+    if (config?.includeRaw) {
+      const rawParser = new RunnableLambda({
+        func: (message: import("@langchain/core/messages").AIMessageChunk): {
+          raw: import("@langchain/core/messages").AIMessageChunk;
+          parsed: T | null;
+          parsingError: Error | null;
+        } => {
+          try {
+            const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+            const parsed = JSON.parse(content) as T;
+            return { raw: message, parsed, parsingError: null };
+          } catch (e) {
+            return {
+              raw: message,
+              parsed: null,
+              parsingError: e instanceof Error ? e : new Error(String(e)),
+            };
+          }
+        },
+      });
+
+      return modelWithFormat.pipe(rawParser) as unknown as Runnable<BaseLanguageModelInput, T>;
+    }
+
+    const jsonParser = new JsonOutputParser<T>();
+    return modelWithFormat.pipe(jsonParser) as unknown as Runnable<BaseLanguageModelInput, T>;
   }
 
   // --------------------------------------------------------

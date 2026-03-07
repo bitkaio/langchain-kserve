@@ -8,6 +8,10 @@
 export { ChatKServe } from "./chat_models.js";
 export { KServeLLM } from "./llms.js";
 
+// Embeddings
+export { KServeEmbeddings } from "./embeddings.js";
+export type { KServeEmbeddingsParams } from "./embeddings.js";
+
 // Types
 export type {
   ChatKServeInput,
@@ -31,6 +35,7 @@ export type {
   OpenAIChatMessage,
   OpenAIChatRequest,
   OpenAIChatResponse,
+  OpenAIResponseFormat,
   OpenAITool,
   OpenAIToolCall,
   OpenAIToolChoice,

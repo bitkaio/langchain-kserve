@@ -223,6 +223,96 @@ const message = new HumanMessage({
 });
 ```
 
+### JSON mode / Response format
+
+```typescript
+// Force valid JSON output
+const llm = new ChatKServe({
+  baseUrl: "...",
+  modelName: "...",
+  protocol: "openai",
+  responseFormat: { type: "json_object" },
+});
+
+// Force output matching a specific JSON schema (vLLM grammar-constrained decoding)
+const llm = new ChatKServe({
+  baseUrl: "...",
+  modelName: "...",
+  protocol: "openai",
+  responseFormat: {
+    type: "json_schema",
+    json_schema: {
+      name: "person",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: { name: { type: "string" }, age: { type: "integer" } },
+        required: ["name", "age"],
+      },
+    },
+  },
+});
+```
+
+### Structured output
+
+```typescript
+import { ChatKServe } from "@bitkaio/langchain-kserve";
+import { z } from "zod";
+
+const llm = new ChatKServe({
+  baseUrl: "...",
+  modelName: "...",
+  protocol: "openai",
+});
+
+const Person = z.object({ name: z.string(), age: z.number() });
+
+// functionCalling (default) — most reliable
+const structured = llm.withStructuredOutput(Person);
+const result = await structured.invoke("Extract: John is 30 years old.");
+console.log(result.name, result.age); // "John", 30
+
+// jsonSchema — vLLM grammar-constrained decoding
+const structured2 = llm.withStructuredOutput(Person, { method: "jsonSchema" });
+
+// jsonMode — json_object with schema instruction
+const structured3 = llm.withStructuredOutput(Person, { method: "jsonMode" });
+
+// includeRaw — get both raw AIMessage and parsed output
+const structured4 = llm.withStructuredOutput(Person, { includeRaw: true });
+const result4 = await structured4.invoke("Extract: John is 30.");
+console.log(result4.parsed);       // { name: "John", age: 30 }
+console.log(result4.raw);          // AIMessage(...)
+console.log(result4.parsingError); // null
+```
+
+### Embeddings
+
+```typescript
+import { KServeEmbeddings } from "@bitkaio/langchain-kserve";
+
+const embeddings = new KServeEmbeddings({
+  baseUrl: "https://my-embedding-model.cluster.example.com",
+  modelName: "Qwen/Qwen3-Embedding-0.6B",
+});
+
+// Embed documents (batched automatically)
+const vectors = await embeddings.embedDocuments(["Hello world", "How are you?"]);
+console.log(vectors.length, vectors[0].length); // 2, <embedding_dim>
+
+// Embed a single query
+const queryVector = await embeddings.embedQuery("What is KServe?");
+
+// With dimensions (Matryoshka models)
+const embeddingsWithDims = new KServeEmbeddings({
+  baseUrl: "...",
+  modelName: "...",
+  dimensions: 512,
+  chunkSize: 500, // max texts per API call (default: 1000)
+});
+```
+
 ### Model introspection
 
 ```typescript
@@ -405,6 +495,7 @@ Extends `BaseChatModel`. Use for chat/instruct models.
 | `logprobs` | `boolean` | — | Return per-token log-probabilities (OpenAI-compat only) |
 | `topLogprobs` | `number` | — | Number of top logprobs per token (OpenAI-compat only) |
 | `parallelToolCalls` | `boolean` | — | Allow multiple tool calls in one turn (OpenAI-compat only) |
+| `responseFormat` | `OpenAIResponseFormat` | — | Response format constraint (e.g. `{ type: "json_object" }`) (OpenAI-compat only) |
 | `timeout` | `number` | `120000` | Request timeout (ms) |
 | `maxRetries` | `number` | `3` | Max retry attempts |
 | `chatTemplate` | `"chatml" \| "llama" \| "custom"` | `"chatml"` | Template for V2 protocol |
@@ -417,6 +508,7 @@ Extends `BaseChatModel`. Use for chat/instruct models.
 | `invoke(input)` | `Promise<AIMessage>` | Single-turn generation |
 | `stream(input)` | `AsyncIterable<AIMessageChunk>` | Streaming generation |
 | `bindTools(tools, kwargs?)` | `Runnable` | Bind tools for function calling |
+| `withStructuredOutput(schema, config?)` | `Runnable` | Structured output via function calling, JSON schema, or JSON mode |
 | `getModelInfo()` | `Promise<KServeModelInfo>` | Fetch model metadata from endpoint |
 
 ### `KServeLLM`
@@ -449,6 +541,28 @@ import {
 } from "@bitkaio/langchain-kserve";
 ```
 
+## API Reference
+
+### `KServeEmbeddings`
+
+```typescript
+const embeddings = new KServeEmbeddings({
+  baseUrl: "...",           // or KSERVE_EMBEDDINGS_BASE_URL / KSERVE_BASE_URL env
+  modelName: "...",         // or KSERVE_EMBEDDINGS_MODEL_NAME env
+  apiKey: "...",            // optional, or KSERVE_API_KEY env
+  dimensions: 512,          // optional, for Matryoshka models
+  encodingFormat: "float",  // "float" (default) or "base64"
+  chunkSize: 1000,          // max texts per API call
+  timeout: 120_000,         // ms
+  maxRetries: 3,
+});
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `embedDocuments(docs)` | `Promise<number[][]>` | Embed a list of documents |
+| `embedQuery(doc)` | `Promise<number[]>` | Embed a single query |
+
 ## Protocol Capability Matrix
 
 | Feature | OpenAI-compat | V2 |
@@ -460,8 +574,11 @@ import {
 | Logprobs | ✅ | ❌ |
 | Token usage tracking | ✅ | ❌ |
 | Finish reason | ✅ | partial |
+| JSON mode / responseFormat | ✅ | ❌ |
+| Structured output | ✅ | ❌ |
+| Embeddings | ✅ | — |
 
-Attempting tool calling or vision with V2 throws `KServeInferenceError` immediately (before any HTTP call) with a clear message.
+Attempting tool calling, vision, or responseFormat with V2 throws `KServeInferenceError` immediately (before any HTTP call) with a clear message.
 
 ## Protocol auto-detection
 

@@ -61,6 +61,7 @@ print(response.content)
 | `top_logprobs` | `int` | `None` | Number of top logprobs per token (OpenAI-compat only) |
 | `tool_choice` | `str \| dict` | `None` | Tool selection strategy: `"auto"`, `"required"`, `"none"`, or specific function |
 | `parallel_tool_calls` | `bool` | `None` | Allow the model to call multiple tools in one turn |
+| `response_format` | `dict` | `None` | Response format constraint (e.g. `{"type": "json_object"}`) (OpenAI-compat only) |
 | `timeout` | `int` | `120` | Request timeout in seconds |
 | `max_retries` | `int` | `3` | Retry attempts |
 
@@ -357,6 +358,105 @@ When `protocol="auto"` (the default), `langchain-kserve` probes the endpoint:
 
 The detected protocol is cached per instance to avoid repeated probes.
 
+### JSON mode / Response format
+
+Constrain the model output to valid JSON or a specific JSON schema (vLLM uses grammar-constrained decoding):
+
+```python
+# Force valid JSON output
+llm = ChatKServe(
+    base_url="...",
+    model_name="...",
+    protocol="openai",
+    response_format={"type": "json_object"},
+)
+
+# Force output matching a specific JSON schema
+llm = ChatKServe(
+    base_url="...",
+    model_name="...",
+    protocol="openai",
+    response_format={
+        "type": "json_schema",
+        "json_schema": {
+            "name": "my_schema",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+                "required": ["name", "age"],
+            },
+        },
+    },
+)
+```
+
+### Structured output
+
+Use `with_structured_output()` for the high-level structured output API:
+
+```python
+from langchain_kserve import ChatKServe
+from pydantic import BaseModel
+
+class Person(BaseModel):
+    name: str
+    age: int
+
+llm = ChatKServe(
+    base_url="...",
+    model_name="...",
+    protocol="openai",
+)
+
+# function_calling (default) — most reliable, uses tool calling
+structured_llm = llm.with_structured_output(Person)
+result = structured_llm.invoke("Extract: John is 30 years old.")
+print(result.name, result.age)  # John, 30
+
+# json_schema — uses vLLM grammar-constrained decoding
+structured_llm = llm.with_structured_output(Person, method="json_schema")
+
+# json_mode — uses json_object response format with schema instruction
+structured_llm = llm.with_structured_output(Person, method="json_mode")
+
+# include_raw=True — get both raw AIMessage and parsed output
+structured_llm = llm.with_structured_output(Person, include_raw=True)
+result = structured_llm.invoke("Extract: John is 30.")
+print(result["parsed"])   # Person(name='John', age=30)
+print(result["raw"])      # AIMessage(...)
+print(result["parsing_error"])  # None
+```
+
+### Embeddings
+
+```python
+from langchain_kserve import KServeEmbeddings
+
+embeddings = KServeEmbeddings(
+    base_url="https://my-embedding-model.cluster.example.com",
+    model_name="Qwen/Qwen3-Embedding-0.6B",
+)
+
+# Embed documents (batched automatically)
+vectors = embeddings.embed_documents(["Hello world", "How are you?"])
+print(len(vectors), len(vectors[0]))  # 2, <embedding_dim>
+
+# Embed a single query
+query_vector = embeddings.embed_query("What is KServe?")
+
+# Async
+vectors = await embeddings.aembed_documents(["Hello world", "How are you?"])
+query_vector = await embeddings.aembed_query("What is KServe?")
+
+# With dimensions (Matryoshka models)
+embeddings = KServeEmbeddings(
+    base_url="...",
+    model_name="...",
+    dimensions=512,
+)
+```
+
 ## Protocol Capability Matrix
 
 | Feature | OpenAI-compat | V2 |
@@ -368,8 +468,11 @@ The detected protocol is cached per instance to avoid repeated probes.
 | Logprobs | ✅ | ❌ |
 | Token usage tracking | ✅ | ❌ |
 | Finish reason | ✅ | partial |
+| JSON mode / response_format | ✅ | ❌ |
+| Structured output | ✅ | ❌ |
+| Embeddings | ✅ | ❌ |
 
-Attempting tool calling or vision with V2 raises `KServeInferenceError` immediately (before any HTTP call) with a clear message.
+Attempting tool calling, vision, or response_format with V2 raises `KServeInferenceError` immediately (before any HTTP call) with a clear message.
 
 ## Error Handling
 
@@ -399,6 +502,33 @@ except KServeInferenceError as e:
     print(f"Inference error: {e}")
     # Also raised for unsupported features on V2 (tools, vision)
 ```
+
+## Embeddings
+
+```python
+from langchain_kserve import KServeEmbeddings
+
+embeddings = KServeEmbeddings(
+    base_url="https://my-embedding-model.cluster.example.com",
+    model_name="Qwen/Qwen3-Embedding-0.6B",
+    chunk_size=500,      # max texts per API call (default: 1000)
+    dimensions=512,      # optional, for Matryoshka models
+)
+
+vectors = embeddings.embed_documents(["Hello world", "How are you?"])
+query_vector = embeddings.embed_query("What is KServe?")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `base_url` | `str` | `KSERVE_EMBEDDINGS_BASE_URL` or `KSERVE_BASE_URL` | Embeddings service URL |
+| `model_name` | `str` | `KSERVE_EMBEDDINGS_MODEL_NAME` | Embedding model name |
+| `api_key` | `SecretStr` | `KSERVE_API_KEY` | Bearer token |
+| `dimensions` | `int` | `None` | Output embedding dimensions |
+| `encoding_format` | `"float" \| "base64"` | `"float"` | Wire format (base64 decoded automatically) |
+| `chunk_size` | `int` | `1000` | Max texts per API call |
+| `timeout` | `int` | `120` | Request timeout (seconds) |
+| `max_retries` | `int` | `3` | Retry attempts |
 
 ## Base Completion Models (`KServeLLM`)
 

@@ -90,6 +90,12 @@ export interface ChatKServeInput extends KServeBaseInput, BaseChatModelParams {
 
   /** Whether to allow the model to make parallel tool calls. */
   parallelToolCalls?: boolean;
+
+  /**
+   * Response format constraint (OpenAI-compatible protocol only).
+   * Use "json_object" for JSON mode, "json_schema" for structured output with a schema.
+   */
+  responseFormat?: OpenAIResponseFormat;
 }
 
 /** Constructor input for KServeLLM */
@@ -117,6 +123,11 @@ export interface ChatKServeCallOptions {
   logprobs?: boolean;
   /** Number of top logprobs to return per token */
   topLogprobs?: number;
+  /**
+   * Response format constraint (OpenAI-compatible protocol only).
+   * Use "json_object" for JSON mode, "json_schema" for structured output with a schema.
+   */
+  responseFormat?: OpenAIResponseFormat;
   /** AbortSignal for cancellation */
   signal?: AbortSignal;
 }
@@ -230,6 +241,12 @@ export interface OpenAIToolCall {
   };
 }
 
+/** Response format constraint for OpenAI-compatible endpoints */
+export interface OpenAIResponseFormat {
+  type: "text" | "json_object" | "json_schema";
+  json_schema?: Record<string, unknown>;
+}
+
 /** OpenAI chat completion request */
 export interface OpenAIChatRequest {
   model: string;
@@ -247,6 +264,7 @@ export interface OpenAIChatRequest {
   stream_options?: {
     include_usage?: boolean;
   };
+  response_format?: OpenAIResponseFormat;
 }
 
 /** OpenAI completions request (non-chat) */

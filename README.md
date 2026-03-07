@@ -8,16 +8,23 @@ Connect any LangChain chain, agent, or multi-agent framework to self-hosted mode
 
 | Package | Language | Registry | Description |
 |---------|----------|----------|-------------|
-| [`langchain-kserve`](./python) | Python | [![PyPI](https://img.shields.io/pypi/v/langchain-kserve)](https://pypi.org/project/langchain-kserve/) | LangChain integration (`ChatKServe`, `KServeLLM`) |
-| [`@bitkaio/langchain-kserve`](./typescript) | TypeScript | [![npm](https://img.shields.io/npm/v/@bitkaio/langchain-kserve)](https://www.npmjs.com/package/@bitkaio/langchain-kserve) | LangChain.js integration (`ChatKServe`, `KServeLLM`) |
+| [`langchain-kserve`](./python) | Python | [![PyPI](https://img.shields.io/pypi/v/langchain-kserve)](https://pypi.org/project/langchain-kserve/) | LangChain integration (`ChatKServe`, `KServeLLM`, `KServeEmbeddings`) |
+| [`@bitkaio/langchain-kserve`](./typescript) | TypeScript | [![npm](https://img.shields.io/npm/v/@bitkaio/langchain-kserve)](https://www.npmjs.com/package/@bitkaio/langchain-kserve) | LangChain.js integration (`ChatKServe`, `KServeLLM`, `KServeEmbeddings`) |
 
 ## Features
 
 - **`ChatKServe`** — `BaseChatModel` for chat/instruct models (Qwen, Llama, Mistral, …)
 - **`KServeLLM`** — `BaseLLM` for base completion models
+- **`KServeEmbeddings`** — `Embeddings` for embedding models via `/v1/embeddings`
 - **Dual protocol** — OpenAI-compatible (`/v1/chat/completions`) and V2 Inference Protocol (`/v2/models/{model}/infer`), auto-detected per instance
 - **Full streaming** — sync and async, SSE for OpenAI-compat, chunked transfer for V2
-- **Tool calling** — passes LangChain tool definitions through in OpenAI function-calling format
+- **Tool calling** — full OpenAI function-calling format with `tool_choice`, `parallel_tool_calls`, and `invalid_tool_calls` handling
+- **Structured output** — `with_structured_output()` / `withStructuredOutput()` via function calling, JSON schema, or JSON mode
+- **Vision / multimodal** — send images alongside text via OpenAI content blocks
+- **JSON mode** — `response_format` for constrained JSON output and schema-guided generation (vLLM)
+- **Token usage tracking** — `llm_output` / `generationInfo` populated from vLLM, including streaming
+- **Logprobs** — optional per-token log-probabilities
+- **Model introspection** — `get_model_info()` / `getModelInfo()` returns unified metadata for both protocols
 - **Production-grade** — custom TLS/CA bundles, static and dynamic bearer token auth (K8s service account tokens), exponential backoff retries, generous cold-start timeouts
 
 ## Quick Start
@@ -130,10 +137,10 @@ Both packages read configuration from `KSERVE_`-prefixed environment variables:
 ```
 langchain-kserve/
 ├── python/          # langchain-kserve Python package
-│   ├── src/
+│   ├── langchain_kserve/
 │   ├── tests/
 │   └── pyproject.toml
-└── typescript/      # @langchain/kserve TypeScript package
+└── typescript/      # @bitkaio/langchain-kserve TypeScript package
     ├── src/
     ├── tests/
     └── package.json

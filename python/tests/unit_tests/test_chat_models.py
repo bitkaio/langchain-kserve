@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 import respx
+from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from langchain_kserve import ChatKServe, KServeModelInfo
 from langchain_kserve._common import (
     KServeAuthenticationError,
+    KServeError,
     KServeInferenceError,
     KServeModelNotFoundError,
 )
@@ -502,3 +504,531 @@ class TestChatKServeAuth:
 
         auth_header = route.calls[0].request.headers.get("Authorization")
         assert auth_header == "Bearer dynamic-token-1"
+
+
+# ---------------------------------------------------------------------------
+# Feature 1: JSON Mode / Response Format
+# ---------------------------------------------------------------------------
+
+
+class TestResponseFormat:
+    @respx.mock
+    def test_response_format_included_in_request_body(self) -> None:
+        """response_format is forwarded to the /v1/chat/completions request body."""
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": '{"answer": "42"}'},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm(response_format={"type": "json_object"})
+        llm._generate([HumanMessage(content="Give me JSON")])
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert sent_body["response_format"] == {"type": "json_object"}
+
+    @respx.mock
+    def test_response_format_absent_when_none(self) -> None:
+        """response_format is not sent when the field is None (default)."""
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": "hi"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()  # response_format defaults to None
+        llm._generate([HumanMessage(content="hi")])
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert "response_format" not in sent_body
+
+    @respx.mock
+    def test_v2_protocol_raises_kserve_error_when_response_format_set(self) -> None:
+        """response_format on a V2 protocol call raises KServeError immediately."""
+        respx.post(f"{BASE_URL}/v2/models/{MODEL}/infer").mock(
+            return_value=httpx.Response(
+                200,
+                json={"outputs": [{"data": ["ok"]}]},
+            )
+        )
+
+        llm = make_llm(protocol="v2", response_format={"type": "json_object"})
+        with pytest.raises(KServeError, match="OpenAI-compatible protocol"):
+            llm._generate([HumanMessage(content="hi")])
+
+    def test_malformed_json_schema_response_format_raises_value_error(self) -> None:
+        """json_schema response_format without a schema dict raises ValueError at construction."""
+        with pytest.raises(ValueError, match="json_schema.schema"):
+            make_llm(
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "MyOutput",
+                        # 'schema' key missing
+                    },
+                }
+            )
+
+    def test_malformed_json_schema_bad_schema_type_raises_value_error(self) -> None:
+        """json_schema with schema as a string (not dict) raises ValueError."""
+        with pytest.raises(ValueError, match="json_schema.schema"):
+            make_llm(
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "MyOutput",
+                        "schema": "not-a-dict",
+                    },
+                }
+            )
+
+    def test_valid_json_schema_response_format_accepted(self) -> None:
+        """json_schema response_format with a proper schema dict passes validation."""
+        llm = make_llm(
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "MyOutput",
+                    "strict": True,
+                    "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+                },
+            }
+        )
+        assert llm.response_format is not None
+        assert llm.response_format["type"] == "json_schema"
+
+    def test_json_object_response_format_accepted(self) -> None:
+        """{"type": "json_object"} is a valid response_format (no nested schema required)."""
+        llm = make_llm(response_format={"type": "json_object"})
+        assert llm.response_format == {"type": "json_object"}
+
+    @respx.mock
+    def test_response_format_json_schema_included_in_request(self) -> None:
+        """json_schema response_format appears verbatim in the request body."""
+        rf = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "Answer",
+                "strict": True,
+                "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            },
+        }
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": '{"answer": "ok"}'},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm(response_format=rf)
+        llm._generate([HumanMessage(content="hi")])
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert sent_body["response_format"]["type"] == "json_schema"
+        assert sent_body["response_format"]["json_schema"]["name"] == "Answer"
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Structured Output via with_structured_output()
+# ---------------------------------------------------------------------------
+
+
+class OutputSchema(BaseModel):
+    """Simple Pydantic model used in with_structured_output tests."""
+    answer: str
+    confidence: float
+
+
+class TestWithStructuredOutputFunctionCalling:
+    @respx.mock
+    def test_function_calling_pydantic_model(self) -> None:
+        """with_structured_output('function_calling') with a Pydantic model
+        forces a tool call and parses args into the schema type."""
+        respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "OutputSchema",
+                                            "arguments": json.dumps(
+                                                {"answer": "Paris", "confidence": 0.99}
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(OutputSchema, method="function_calling")
+        result = chain.invoke([HumanMessage(content="Capital of France?")])
+
+        assert isinstance(result, OutputSchema)
+        assert result.answer == "Paris"
+        assert result.confidence == pytest.approx(0.99)
+
+    @respx.mock
+    def test_function_calling_dict_schema(self) -> None:
+        """with_structured_output('function_calling') with a dict schema returns a dict."""
+        schema_dict: Dict[str, Any] = {
+            "title": "MyOutput",
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+        }
+        respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_2",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "MyOutput",
+                                            "arguments": json.dumps({"value": 7}),
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(schema_dict, method="function_calling")
+        result = chain.invoke([HumanMessage(content="Give me a value")])
+
+        assert isinstance(result, dict)
+        assert result["value"] == 7
+
+    @respx.mock
+    def test_function_calling_tool_choice_forced(self) -> None:
+        """bind_tools is called with tool_choice forcing the specific function."""
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_3",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "OutputSchema",
+                                            "arguments": json.dumps(
+                                                {"answer": "yes", "confidence": 1.0}
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(OutputSchema, method="function_calling")
+        chain.invoke([HumanMessage(content="Are you sure?")])
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert "tool_choice" in sent_body
+        assert sent_body["tool_choice"]["type"] == "function"
+        assert sent_body["tool_choice"]["function"]["name"] == "OutputSchema"
+
+
+class TestWithStructuredOutputJsonSchema:
+    @respx.mock
+    def test_json_schema_pydantic_model(self) -> None:
+        """with_structured_output('json_schema') sets response_format and parses JSON."""
+        respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"answer": "Rome", "confidence": 0.85}),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(OutputSchema, method="json_schema")
+        result = chain.invoke([HumanMessage(content="Capital of Italy?")])
+
+        assert isinstance(result, OutputSchema)
+        assert result.answer == "Rome"
+
+    @respx.mock
+    def test_json_schema_request_body_contains_response_format(self) -> None:
+        """json_schema method sets response_format.type='json_schema' in request."""
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"answer": "Rome", "confidence": 0.85}),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(OutputSchema, method="json_schema")
+        chain.invoke([HumanMessage(content="hi")])
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert sent_body["response_format"]["type"] == "json_schema"
+        assert sent_body["response_format"]["json_schema"]["name"] == "OutputSchema"
+        assert sent_body["response_format"]["json_schema"]["strict"] is True
+
+    @respx.mock
+    def test_json_schema_strict_override(self) -> None:
+        """strict=False is respected when building json_schema response_format."""
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"answer": "x", "confidence": 0.0}),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(OutputSchema, method="json_schema", strict=False)
+        chain.invoke([HumanMessage(content="hi")])
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert sent_body["response_format"]["json_schema"]["strict"] is False
+
+
+class TestWithStructuredOutputJsonMode:
+    @respx.mock
+    def test_json_mode_returns_dict(self) -> None:
+        """with_structured_output('json_mode') sets json_object response_format and returns dict."""
+        route = respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"city": "Berlin"}),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(
+            {"type": "object", "properties": {"city": {"type": "string"}}},
+            method="json_mode",
+        )
+        result = chain.invoke([HumanMessage(content="A city?")])
+
+        assert isinstance(result, dict)
+        assert result["city"] == "Berlin"
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert sent_body["response_format"] == {"type": "json_object"}
+
+
+class TestWithStructuredOutputIncludeRaw:
+    @respx.mock
+    def test_include_raw_true_function_calling(self) -> None:
+        """include_raw=True wraps output in {'raw', 'parsed', 'parsing_error'} dict."""
+        respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_x",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "OutputSchema",
+                                            "arguments": json.dumps(
+                                                {"answer": "yes", "confidence": 1.0}
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(
+            OutputSchema, method="function_calling", include_raw=True
+        )
+        result = chain.invoke([HumanMessage(content="Are you certain?")])
+
+        assert isinstance(result, dict)
+        assert "raw" in result
+        assert "parsed" in result
+        assert "parsing_error" in result
+        assert isinstance(result["raw"], AIMessage)
+        assert isinstance(result["parsed"], OutputSchema)
+        assert result["parsing_error"] is None
+
+    @respx.mock
+    def test_include_raw_true_json_mode(self) -> None:
+        """include_raw=True with json_mode method returns correct structure."""
+        respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"x": 1}),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(
+            {"type": "object"},
+            method="json_mode",
+            include_raw=True,
+        )
+        result = chain.invoke([HumanMessage(content="give json")])
+
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"raw", "parsed", "parsing_error"}
+        assert isinstance(result["raw"], AIMessage)
+        assert result["parsed"] == {"x": 1}
+        assert result["parsing_error"] is None
+
+    @respx.mock
+    def test_include_raw_true_parsing_error_captured(self) -> None:
+        """When parsing fails, include_raw=True returns parsing_error and parsed=None."""
+        respx.post(f"{BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                # Model returns no tool_calls, causing parser to raise
+                                "content": "Sorry, I cannot do that.",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+
+        llm = make_llm()
+        chain = llm.with_structured_output(
+            OutputSchema, method="function_calling", include_raw=True
+        )
+        result = chain.invoke([HumanMessage(content="hmm")])
+
+        assert result["raw"] is not None
+        assert result["parsed"] is None
+        assert result["parsing_error"] is not None

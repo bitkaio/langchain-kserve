@@ -441,6 +441,96 @@ class TestVisionContent:
         assert content[1] == {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
 
 
+class TestResponseFormat:
+    def test_response_format_included_when_set(self) -> None:
+        """response_format dict appears in the request body when provided."""
+        rf = {"type": "json_object"}
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            response_format=rf,
+        )
+        assert body["response_format"] == rf
+
+    def test_response_format_omitted_when_none(self) -> None:
+        """response_format key is absent when None is passed."""
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            response_format=None,
+        )
+        assert "response_format" not in body
+
+    def test_response_format_json_schema_passed_through(self) -> None:
+        """json_schema response_format is passed through verbatim."""
+        rf = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "MyOutput",
+                "strict": True,
+                "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            },
+        }
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            response_format=rf,
+        )
+        assert body["response_format"]["type"] == "json_schema"
+        assert body["response_format"]["json_schema"]["name"] == "MyOutput"
+        assert body["response_format"]["json_schema"]["schema"]["type"] == "object"
+
+    def test_response_format_coexists_with_tools(self) -> None:
+        """response_format and tools can both be present in the same request body."""
+        tool = {"type": "function", "function": {"name": "fn", "description": "d", "parameters": {}}}
+        rf = {"type": "json_object"}
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            tools=[tool],
+            response_format=rf,
+        )
+        assert "tools" in body
+        assert "response_format" in body
+
+    def test_response_format_not_overwritten_by_extra_kwargs(self) -> None:
+        """extra_kwargs merging does not overwrite an explicit response_format."""
+        rf = {"type": "json_object"}
+        body = build_chat_request(
+            model_name="m",
+            messages=[HumanMessage(content="hi")],
+            temperature=0.7,
+            max_tokens=None,
+            top_p=1.0,
+            stop=None,
+            stream=False,
+            response_format=rf,
+            extra_kwargs={"frequency_penalty": 0.1},
+        )
+        assert body["response_format"] == rf
+        assert body["frequency_penalty"] == 0.1
+
+
 class TestFinishReason:
     def test_parse_chat_response_finish_reason_always_present(self) -> None:
         """finish_reason is always in generation_info, even if None."""
