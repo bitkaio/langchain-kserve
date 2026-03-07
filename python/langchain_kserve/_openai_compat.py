@@ -543,8 +543,18 @@ def _parse_sse_chat_line(
     finish_reason = choices[0].get("finish_reason")
     logprobs_data: Optional[Any] = choices[0].get("logprobs")
 
-    # Handle tool call deltas
-    tool_call_chunks = delta.get("tool_calls")
+    # Handle tool call deltas — convert from OpenAI wire format to LangChain ToolCallChunk
+    raw_tool_call_chunks = delta.get("tool_calls") or []
+    lc_tool_call_chunks = []
+    for tc in raw_tool_call_chunks:
+        fn = tc.get("function") or {}
+        lc_tool_call_chunks.append({
+            "name": fn.get("name"),
+            "args": fn.get("arguments"),
+            "id": tc.get("id"),
+            "index": tc.get("index"),
+            "type": "tool_call_chunk",
+        })
 
     generation_info: Dict[str, Any] = {
         "model": model_name,
@@ -556,7 +566,7 @@ def _parse_sse_chat_line(
     return ChatGenerationChunk(
         message=AIMessageChunk(
             content=content,
-            tool_call_chunks=tool_call_chunks or [],
+            tool_call_chunks=lc_tool_call_chunks,
         ),
         generation_info=generation_info,
     )
