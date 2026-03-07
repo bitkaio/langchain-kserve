@@ -30,6 +30,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.tools import BaseTool
 from langchain_core.utils import get_from_env
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from langchain_kserve._common import (
@@ -310,7 +311,7 @@ class ChatKServe(BaseChatModel):
         Returns:
             A new :class:`ChatKServe` instance with ``_tools`` set.
         """
-        formatted_tools = [_format_tool(t) for t in tools]
+        formatted_tools = [convert_to_openai_tool(t) for t in tools]
         update: Dict[str, Any] = {}
         if tool_choice is not None:
             update["tool_choice"] = tool_choice
@@ -845,39 +846,3 @@ class ChatKServe(BaseChatModel):
                 )
 
 
-# ---------------------------------------------------------------------------
-# Tool formatting helper
-# ---------------------------------------------------------------------------
-
-
-def _format_tool(tool: Any) -> Dict[str, Any]:
-    """Convert a LangChain tool, Pydantic model, or dict into OpenAI tool schema.
-
-    Args:
-        tool: A :class:`~langchain_core.tools.BaseTool`, a Pydantic model class,
-            or an already-formatted dict.
-
-    Returns:
-        OpenAI-compatible tool schema dict.
-    """
-    if isinstance(tool, dict):
-        return tool
-    if hasattr(tool, "as_tool"):
-        # Pydantic model with as_tool helper
-        return tool.as_tool()  # type: ignore[union-attr]
-    if hasattr(tool, "name") and hasattr(tool, "description"):
-        # BaseTool
-        schema = getattr(tool, "args_schema", None)
-        parameters: Dict[str, Any] = {"type": "object", "properties": {}}
-        if schema is not None and hasattr(schema, "model_json_schema"):
-            parameters = schema.model_json_schema()
-        return {
-            "type": "function",
-            "function": {
-                "name": tool.name,  # type: ignore[union-attr]
-                "description": tool.description,  # type: ignore[union-attr]
-                "parameters": parameters,
-            },
-        }
-    # Last resort
-    return {"type": "function", "function": str(tool)}
