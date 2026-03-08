@@ -116,7 +116,7 @@ asyncio.run(main())
 ### In a LangChain chain
 
 ```python
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.prompts import ChatPromptTemplate
 from langchain_kserve import ChatKServe
 
 llm = ChatKServe(
@@ -182,7 +182,7 @@ print(response.response_metadata["logprobs"])
 Tool calling works when using the OpenAI-compatible endpoint (e.g., vLLM, TGI).
 
 ```python
-from langchain_core.tools import tool
+from langchain.tools import tool
 from langchain_kserve import ChatKServe
 
 @tool
@@ -216,7 +216,7 @@ if response.invalid_tool_calls:
 Pass images alongside text using OpenAI content blocks. Works with OpenAI-compatible runtimes that support vision (e.g., vLLM with a multimodal model).
 
 ```python
-from langchain_core.messages import HumanMessage
+from langchain.messages import HumanMessage
 from langchain_kserve import ChatKServe
 import base64, pathlib
 
@@ -317,7 +317,7 @@ llm = ChatKServe(
 
 ```python
 from langchain_kserve import ChatKServe
-from langchain_core.tools import tool
+from langchain.tools import tool
 
 @tool
 def code_executor(code: str) -> str:
@@ -335,7 +335,7 @@ llm = ChatKServe(
 )
 
 from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.prompts import ChatPromptTemplate
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful coding assistant with access to a Python executor."),
